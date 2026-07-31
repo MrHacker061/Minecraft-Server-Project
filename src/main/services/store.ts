@@ -198,6 +198,25 @@ export class AppStore {
     })
   }
 
+  async removeInstance(id: string): Promise<ServerInstance> {
+    return this.serializeMutation(async () => {
+      const index = this.data.instances.findIndex((item) => item.id === id)
+      const instance = this.data.instances[index]
+      if (index < 0 || !instance) {
+        throw new AppError('That server no longer exists.', 'INSTANCE_NOT_FOUND')
+      }
+
+      this.data.instances.splice(index, 1)
+      try {
+        await this.persist()
+      } catch (error) {
+        this.data.instances.splice(index, 0, instance)
+        throw error
+      }
+      return cloneInstance(instance)
+    })
+  }
+
   async updateSettings(settings: AppSettings): Promise<void> {
     return this.serializeMutation(async () => {
       const previous = this.data.settings

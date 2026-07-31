@@ -1,14 +1,15 @@
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, shell, Tray, type IpcMainInvokeEvent } from 'electron'
 import { cpus, homedir, networkInterfaces, totalmem } from 'node:os'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { channels } from '../shared/channels'
 import type { AppSettings, LatestVersion } from '../shared/contracts'
 import { AppError, toPublicError } from './services/errors'
 import { InstanceService } from './services/instance-service'
 import { checkJava } from './services/java'
-import { resolveLatestRelease } from './services/minecraft'
+import { listOfficialReleases, resolveLatestRelease, resolveRelease } from './services/minecraft'
 import { resolveLatestPaperBuild } from './services/paper'
+import { PluginService } from './services/plugin-service'
 import { ServerManager } from './services/server-manager'
 import { AppStore } from './services/store'
 import { validateForceLoadedRegionInput, validateWorldPreparationInput, WorldService } from './services/world-service'
@@ -16,8 +17,11 @@ import {
   appSettingsSchema,
   commandSchema,
   createInstanceSchema,
+  deleteInstanceSchema,
   instanceIdSchema,
+  minecraftVersionSchema,
   removeForceLoadedRegionSchema,
+  removePaperPluginSchema,
   updateInstanceSchema,
   validationMessage
 } from './services/validation'
@@ -36,6 +40,7 @@ let store: AppStore
 let manager: ServerManager
 let instanceService: InstanceService
 let worldService: WorldService
+let pluginService: PluginService
 
 if (!gotSingleInstanceLock) app.quit()
 
@@ -238,6 +243,12 @@ function registerIpc(): void {
     const version = await resolveLatestRelease()
     return { id: version.id, type: 'release', requiredJavaVersion: version.requiredJavaVersion } satisfies LatestVersion
   })
+  handle(channels.minecraftReleases, () => listOfficialReleases())
+  handle(channels.minecraftRelease, async (_event, minecraftVersion) => {
+    const id = parseOrThrow(minecraftVersionSchema.safeParse(minecraftVersion))
+    const version = await resolveRelease(id)
+    return { id: version.id, type: 'release', requiredJavaVersion: version.requiredJavaVersion } satisfies LatestVersion
+  })
   handle(channels.latestPaperBuild, async (_event, minecraftVersion) => {
     if (typeof minecraftVersion !== 'string') throw new AppError('Invalid Minecraft version.', 'VALIDATION_ERROR')
     return resolveLatestPaperBuild(minecraftVersion)
@@ -259,6 +270,23 @@ function registerIpc(): void {
     const result = await instanceService.update(parsed)
     rebuildTrayMenu()
     return result
+  })
+  handle(channels.deleteInstance, async (_event, input) => {
+    assertCanMutate()
+    const parsed = parseOrThrow(deleteInstanceSchema.safeParse(input))
+    await worldService.beginInstanceDeletion(parsed.id)
+    try {
+      await instanceService.delete(parsed)
+    } catch (error) {
+      worldService.abortInstanceDeletion(parsed.id)
+      throw error
+    }
+    worldService.completeInstanceDeletion(parsed.id)
+    try {
+      rebuildTrayMenu()
+    } catch (error) {
+      console.error('Could not refresh the tray after deleting a server.', error)
+    }
   })
   handle(channels.startInstance, async (_event, id) => {
     assertCanMutate()
@@ -330,6 +358,36 @@ function registerIpc(): void {
     const parsed = parseOrThrow(removeForceLoadedRegionSchema.safeParse(input))
     return worldService.removeForceLoadedRegion(parsed)
   })
+  handle(channels.getPaperPlugins, (_event, id) => {
+    const parsedId = parseOrThrow(instanceIdSchema.safeParse(id))
+    return pluginService.list(parsedId)
+  })
+  handle(channels.choosePaperPlugin, async (_event, id) => {
+    assertCanMutate()
+    const parsedId = parseOrThrow(instanceIdSchema.safeParse(id))
+    const plugins = await pluginService.list(parsedId)
+    if (manager.isActive(parsedId)) {
+      throw new AppError('Stop the Paper server before changing its plugins.', 'SERVER_MUST_BE_STOPPED')
+    }
+    if (!mainWindow || mainWindow.isDestroyed()) throw new AppError('The EmberHost window is unavailable.', 'WINDOW_UNAVAILABLE')
+    const choice = await dialog.showOpenDialog(mainWindow, {
+      title: 'Choose a Paper plugin JAR',
+      properties: ['openFile'],
+      filters: [{ name: 'Minecraft plugin JAR', extensions: ['jar'] }]
+    })
+    if (choice.canceled || !choice.filePaths[0]) return { canceled: true, installed: null, plugins }
+    assertCanMutate()
+    const sourcePath = choice.filePaths[0]
+    const updated = await pluginService.installFromPath(parsedId, sourcePath)
+    const sourceName = basename(sourcePath)
+    const installed = updated.find((plugin) => plugin.fileName.toLowerCase() === sourceName.toLowerCase()) ?? null
+    return { canceled: false, installed, plugins: updated }
+  })
+  handle(channels.removePaperPlugin, (_event, input) => {
+    assertCanMutate()
+    const parsed = parseOrThrow(removePaperPluginSchema.safeParse(input))
+    return pluginService.remove(parsed.instanceId, parsed.fileName)
+  })
 }
 
 async function initialize(): Promise<void> {
@@ -337,8 +395,9 @@ async function initialize(): Promise<void> {
   store = new AppStore(dataDirectory)
   await store.load()
   manager = new ServerManager(store)
-  instanceService = new InstanceService(store, manager, dataDirectory)
+  instanceService = new InstanceService(store, manager, dataDirectory, (itemPath) => shell.trashItem(itemPath))
   worldService = new WorldService(store, manager)
+  pluginService = new PluginService(store, manager, (itemPath) => shell.trashItem(itemPath))
   manager.onConsole((entry) => mainWindow?.webContents.send(channels.consoleEntry, entry))
   manager.onState((event) => {
     mainWindow?.webContents.send(channels.stateChange, event)

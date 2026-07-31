@@ -40,6 +40,28 @@ try {
   if (!security.bodyText.includes('Build a world that stays yours.')) {
     throw new Error(`Onboarding did not render: ${JSON.stringify({ security, browserMessages })}`)
   }
+  const releaseSelect = window.getByLabel('Minecraft release')
+  await releaseSelect.waitFor()
+  const initialRelease = await releaseSelect.inputValue()
+  const releaseOptions = await releaseSelect.locator('option').allTextContents()
+  if (!releaseOptions.some((option) => option.startsWith('1.20.1')) || !releaseOptions.some((option) => option.startsWith('1.0'))) {
+    throw new Error(`Official Mojang release catalog was incomplete: ${JSON.stringify(releaseOptions.slice(-12))}`)
+  }
+  await releaseSelect.selectOption('1.20.1')
+  await window.getByText('Official Mojang server · Requires Java 17').waitFor({ timeout: 25_000 })
+  await releaseSelect.selectOption('1.0')
+  await window.getByText('Minecraft 1.0 does not provide a vanilla server download.').waitFor({ timeout: 25_000 })
+  if (await window.getByRole('button', { name: 'Continue' }).isEnabled()) {
+    throw new Error('Creation advanced for an official release without a Mojang server artifact.')
+  }
+  await releaseSelect.selectOption(initialRelease)
+  const paperChoice = window.locator('input[name="software"][value="paper"]')
+  await paperChoice.locator('xpath=..').waitFor()
+  for (let attempt = 0; attempt < 100 && !(await paperChoice.isEnabled()); attempt += 1) {
+    await new Promise((resolveWait) => setTimeout(resolveWait, 100))
+  }
+  if (!(await paperChoice.isEnabled())) throw new Error(`Paper did not become available for Minecraft ${initialRelease}.`)
+  await paperChoice.check()
   await window.getByRole('button', { name: 'Continue' }).click()
   await window.getByText('Shape performance').waitFor()
   await window.getByRole('button', { name: 'Continue' }).click()

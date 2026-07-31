@@ -12,7 +12,10 @@ const paperServerDirectory = resolve(testProfile, 'runtime-data', 'servers', pap
 await rm(testProfile, { recursive: true, force: true })
 await mkdir(serverDirectory, { recursive: true })
 await mkdir(paperServerDirectory, { recursive: true })
+await mkdir(resolve(paperServerDirectory, 'plugins'), { recursive: true })
 await mkdir(artifacts, { recursive: true })
+await writeFile(resolve(paperServerDirectory, 'plugins', 'Chunky.jar'), 'seeded built-in plugin', 'utf8')
+await writeFile(resolve(paperServerDirectory, 'plugins', 'ExamplePlugin.jar'), 'seeded external plugin', 'utf8')
 
 const timestamp = '2026-07-31T12:00:00.000Z'
 await writeFile(resolve(testProfile, 'runtime-data', 'emberhost.json'), `${JSON.stringify({
@@ -91,13 +94,21 @@ try {
   await window.locator('.topbar h1').getByText('Cedar Valley', { exact: true }).waitFor()
   if (browserMessages.length) throw new Error(`Dashboard renderer errors: ${JSON.stringify(browserMessages)}`)
   await window.screenshot({ path: resolve(artifacts, 'dashboard.png') })
-  await window.getByRole('button', { name: 'World tools', exact: true }).click()
+  await window.locator('nav').getByRole('button', { name: 'World tools', exact: true }).click()
   await window.getByText('World tools need a Paper server.').waitFor()
   await window.screenshot({ path: resolve(artifacts, 'world-tools.png') })
+  await window.getByRole('button', { name: 'Plugins', exact: false }).click()
+  await window.getByText('Plugins need a Paper server.').waitFor()
+  await window.screenshot({ path: resolve(artifacts, 'plugins-vanilla.png') })
   await window.getByLabel('Active server').selectOption(paperServerId)
   if (await window.getByLabel('Active server').inputValue() !== paperServerId) {
     throw new Error('Paper server selection did not stick.')
   }
+  await window.getByText('Paper plugins', { exact: true }).waitFor()
+  await window.getByText('Chunky', { exact: true }).waitFor()
+  await window.getByText('ExamplePlugin', { exact: true }).waitFor()
+  await window.screenshot({ path: resolve(artifacts, 'paper-plugins.png') })
+  await window.locator('nav').getByRole('button', { name: 'World tools', exact: false }).click()
   await window.getByText('World Preparation', { exact: true }).waitFor()
   await window.getByText('Force-loaded Regions', { exact: true }).waitFor()
   await window.screenshot({ path: resolve(artifacts, 'paper-world-tools.png') })
@@ -108,8 +119,21 @@ try {
   await window.getByText('Paper Ridge console').waitFor()
   await window.getByRole('button', { name: 'Settings', exact: true }).click()
   await window.getByText('Server identity').waitFor()
+  await window.getByRole('button', { name: 'Delete server', exact: true }).click()
+  await window.getByText('Delete Paper Ridge?').waitFor()
+  const deleteInput = window.locator('.confirm-dialog input')
+  await deleteInput.fill('wrong name')
+  if (await window.getByRole('button', { name: 'Move to recycle bin' }).isEnabled()) {
+    throw new Error('Deletion confirmation accepted the wrong server name.')
+  }
+  await deleteInput.fill('Paper Ridge')
+  if (!(await window.getByRole('button', { name: 'Move to recycle bin' }).isEnabled())) {
+    throw new Error('Deletion confirmation did not accept the exact server name.')
+  }
+  await window.screenshot({ path: resolve(artifacts, 'delete-confirm.png') })
+  await window.getByRole('button', { name: 'Cancel', exact: true }).click()
   await access(resolve(testProfile, 'runtime-data', 'emberhost.json'))
-  process.stdout.write(`${JSON.stringify({ dashboard: true, browserMessages, screenshots: ['artifacts/dashboard.png', 'artifacts/world-tools.png', 'artifacts/paper-dashboard.png', 'artifacts/paper-world-tools.png'] })}\n`)
+  process.stdout.write(`${JSON.stringify({ dashboard: true, browserMessages, screenshots: ['artifacts/dashboard.png', 'artifacts/world-tools.png', 'artifacts/plugins-vanilla.png', 'artifacts/paper-dashboard.png', 'artifacts/paper-world-tools.png', 'artifacts/paper-plugins.png', 'artifacts/delete-confirm.png'] })}\n`)
 } finally {
   await application.evaluate(({ app }) => {
     setTimeout(() => app.exit(0), 20)

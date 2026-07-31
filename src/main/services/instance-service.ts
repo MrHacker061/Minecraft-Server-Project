@@ -1,8 +1,9 @@
 import { randomUUID } from 'node:crypto'
-import { copyFile, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { copyFile, lstat, mkdir, readFile, realpath, rename, rm, writeFile } from 'node:fs/promises'
+import { isAbsolute, join, relative, resolve } from 'node:path'
 import type {
   CreateInstanceInput,
+  DeleteInstanceInput,
   InstanceView,
   PaperBuildInfo,
   ServerInstance,
@@ -20,6 +21,7 @@ import type { ServerManager } from './server-manager'
 import type { AppStore } from './store'
 
 type ProgressListener = (progress: SetupProgress) => void
+type TrashItem = (path: string) => Promise<void>
 
 export class InstanceService {
   private readonly serversDirectory: string
@@ -29,7 +31,10 @@ export class InstanceService {
   constructor(
     private readonly store: AppStore,
     private readonly manager: ServerManager,
-    runtimeDataDirectory = store.dataDirectory
+    runtimeDataDirectory = store.dataDirectory,
+    private readonly trashItem: TrashItem = async () => {
+      throw new AppError('This platform did not provide a recycle-bin service.', 'TRASH_UNAVAILABLE')
+    }
   ) {
     this.serversDirectory = join(runtimeDataDirectory, 'servers')
     this.artifactsDirectory = join(runtimeDataDirectory, 'artifact-cache')
@@ -178,6 +183,122 @@ export class InstanceService {
 
   async update(input: UpdateInstanceInput): Promise<InstanceView> {
     return this.serializeMutation(() => this.manager.runExclusive(input.id, () => this.updateUnlocked(input)))
+  }
+
+  async delete(input: DeleteInstanceInput): Promise<void> {
+    return this.serializeMutation(() => this.manager.runExclusive(input.id, () => this.deleteUnlocked(input)))
+  }
+
+  private async deleteUnlocked(input: DeleteInstanceInput): Promise<void> {
+    const current = this.store.getInstance(input.id)
+    if (!current) throw new AppError('That server no longer exists.', 'INSTANCE_NOT_FOUND')
+    if (input.confirmationName !== current.name) {
+      throw new AppError('Enter the server name exactly to confirm deletion.', 'DELETE_CONFIRMATION_MISMATCH')
+    }
+
+    await this.manager.assertStoppedAndUnowned(input.id)
+    const managedDirectory = await this.assertManagedInstanceDirectory(current)
+    const quarantinedDirectory = join(this.serversDirectory, `.${current.id}.deleting-${randomUUID()}`)
+    await rename(managedDirectory, quarantinedDirectory)
+
+    let metadataRemoved = false
+    try {
+      await this.store.removeInstance(current.id)
+      metadataRemoved = true
+      await this.trashItem(quarantinedDirectory)
+    } catch (error) {
+      const rollbackFailures: string[] = []
+      let directoryRestored = false
+      try {
+        await rename(quarantinedDirectory, managedDirectory)
+        directoryRestored = true
+      } catch (rollbackError) {
+        rollbackFailures.push(`folder: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`)
+      }
+
+      if (metadataRemoved && directoryRestored) {
+        try {
+          await this.store.addInstance(current)
+        } catch (rollbackError) {
+          rollbackFailures.push(`metadata: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`)
+        }
+      }
+
+      if (rollbackFailures.length) {
+        throw new AppError(
+          `EmberHost could not finish deleting “${current.name}” or fully restore it. The staged recovery path is ${quarantinedDirectory}.`,
+          'DELETE_ROLLBACK_FAILED',
+          rollbackFailures.join('; ')
+        )
+      }
+      throw new AppError(
+        `EmberHost could not move “${current.name}” to the recycle bin, so the server was restored.`,
+        'SERVER_DELETE_FAILED',
+        error instanceof Error ? error.message : String(error)
+      )
+    }
+
+    this.manager.forgetInstance(current.id)
+  }
+
+  private async assertManagedInstanceDirectory(instance: ServerInstance): Promise<string> {
+    const serversRoot = resolve(this.serversDirectory)
+    const expectedDirectory = resolve(serversRoot, instance.id)
+    const comparison = (value: string): string =>
+      process.platform === 'win32' || process.platform === 'darwin' ? value.toLocaleLowerCase('en-US') : value
+    if (comparison(resolve(instance.serverDirectory)) !== comparison(expectedDirectory)) {
+      throw new AppError(
+        'EmberHost refused to delete a server whose folder is outside its managed servers directory.',
+        'UNMANAGED_SERVER_DIRECTORY'
+      )
+    }
+    const childPath = relative(serversRoot, expectedDirectory)
+    if (!childPath || childPath.startsWith('..') || isAbsolute(childPath) || childPath !== instance.id) {
+      throw new AppError('The managed server path is invalid.', 'UNMANAGED_SERVER_DIRECTORY')
+    }
+
+    let directoryStats
+    try {
+      directoryStats = await lstat(expectedDirectory)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        throw new AppError('The server folder is missing. EmberHost left its registry entry untouched.', 'SERVER_DIRECTORY_MISSING')
+      }
+      throw error
+    }
+    if (!directoryStats.isDirectory() || directoryStats.isSymbolicLink()) {
+      throw new AppError('The managed server path is not a normal local directory.', 'UNSAFE_SERVER_DIRECTORY')
+    }
+
+    const [realServersRoot, realServerDirectory] = await Promise.all([
+      realpath(serversRoot),
+      realpath(expectedDirectory)
+    ])
+    if (comparison(realServerDirectory) !== comparison(resolve(realServersRoot, instance.id))) {
+      throw new AppError('The server folder resolves outside EmberHost’s managed directory.', 'UNSAFE_SERVER_DIRECTORY')
+    }
+
+    const ownershipPath = join(expectedDirectory, 'emberhost-instance.json')
+    try {
+      const ownershipStats = await lstat(ownershipPath)
+      if (!ownershipStats.isFile() || ownershipStats.isSymbolicLink() || ownershipStats.size > 1024 * 1024) {
+        throw new AppError('The server ownership marker is invalid.', 'INVALID_INSTANCE_MARKER')
+      }
+      const marker = JSON.parse(await readFile(ownershipPath, 'utf8')) as { id?: unknown }
+      if (marker.id !== instance.id) {
+        throw new AppError('The server ownership marker does not match this instance.', 'INVALID_INSTANCE_MARKER')
+      }
+    } catch (error) {
+      if (error instanceof AppError) throw error
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        throw new AppError('The server ownership marker is missing.', 'INVALID_INSTANCE_MARKER')
+      }
+      if (error instanceof SyntaxError) {
+        throw new AppError('The server ownership marker is unreadable.', 'INVALID_INSTANCE_MARKER')
+      }
+      throw error
+    }
+    return expectedDirectory
   }
 
   private async updateUnlocked(input: UpdateInstanceInput): Promise<InstanceView> {

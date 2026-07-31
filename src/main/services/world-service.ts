@@ -260,6 +260,7 @@ export class WorldService {
   private readonly preparationListeners = new Set<PreparationListener>()
   private readonly forceListeners = new Set<ForceRegionsListener>()
   private readonly queues = new Map<string, Promise<unknown>>()
+  private readonly deletingInstances = new Set<string>()
   private readonly pauseRequested = new Set<string>()
   private readonly cancelRequested = new Set<string>()
   private readonly backupsInProgress = new Set<string>()
@@ -286,6 +287,41 @@ export class WorldService {
   onForceLoadedRegionsChange(listener: ForceRegionsListener): () => void {
     this.forceListeners.add(listener)
     return () => this.forceListeners.delete(listener)
+  }
+
+  async beginInstanceDeletion(instanceId: string): Promise<void> {
+    const id = instanceIdSchema.parse(instanceId)
+    if (this.deletingInstances.has(id)) {
+      throw new AppError('That server is already being deleted.', 'INSTANCE_DELETING')
+    }
+    this.deletingInstances.add(id)
+    try {
+      await (this.queues.get(id) ?? Promise.resolve()).catch(() => undefined)
+    } catch (error) {
+      this.deletingInstances.delete(id)
+      throw error
+    }
+  }
+
+  abortInstanceDeletion(instanceId: string): void {
+    this.deletingInstances.delete(instanceId)
+  }
+
+  completeInstanceDeletion(instanceId: string): void {
+    this.states.delete(instanceId)
+    this.levelNames.delete(instanceId)
+    this.pauseRequested.delete(instanceId)
+    this.cancelRequested.delete(instanceId)
+    this.backupsInProgress.delete(instanceId)
+    this.taintedBackups.delete(instanceId)
+    const waiters = this.consoleWaiters.get(instanceId)
+    if (waiters) {
+      for (const waiter of waiters) {
+        clearTimeout(waiter.timeout)
+        waiter.resolve(false)
+      }
+      this.consoleWaiters.delete(instanceId)
+    }
   }
 
   async getWorldPreparation(instanceId: string): Promise<WorldPreparationState> {
@@ -1059,7 +1095,12 @@ export class WorldService {
 
   private serialize<T>(instanceId: string, operation: () => Promise<T>): Promise<T> {
     const previous = this.queues.get(instanceId) ?? Promise.resolve()
-    const next = previous.catch(() => undefined).then(operation)
+    const next = previous.catch(() => undefined).then(() => {
+      if (this.deletingInstances.has(instanceId)) {
+        throw new AppError('That server is being deleted.', 'INSTANCE_DELETING')
+      }
+      return operation()
+    })
     this.queues.set(instanceId, next)
     const cleanup = (): void => {
       if (this.queues.get(instanceId) === next) this.queues.delete(instanceId)

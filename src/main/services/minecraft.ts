@@ -3,10 +3,13 @@ import { createReadStream } from 'node:fs'
 import { mkdir, open, rename, rm, stat } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import { z } from 'zod'
-import type { LatestVersion, SetupProgress } from '../../shared/contracts'
+import type { LatestVersion, MinecraftReleaseInfo, SetupProgress } from '../../shared/contracts'
 import { AppError } from './errors'
 
 const VERSION_MANIFEST = 'https://piston-meta.mojang.com/mc/game/version_manifest_v2.json'
+const LEGACY_JAVA_VERSION = 8
+// Mojang's current metadata omits javaVersion only for these server-bearing releases.
+const LEGACY_JAVA_8_RELEASES = new Set(['1.6.1', '1.6.2', '1.6.4'])
 
 const versionId = z.string().min(1).max(64).regex(/^[A-Za-z0-9._-]+$/)
 const serverDownloadSchema = z.object({
@@ -17,15 +20,17 @@ const serverDownloadSchema = z.object({
 const versionManifestSchema = z.object({
   latest: z.object({ release: versionId }),
   versions: z.array(z.object({
+    // Snapshot and historical manifest IDs can contain characters that are not valid release IDs.
     id: z.string().min(1).max(128),
     type: z.string().min(1).max(32),
-    url: z.string().url()
+    url: z.string().url(),
+    releaseTime: z.string().datetime({ offset: true })
   })).max(100_000)
 })
 const versionDetailsSchema = z.object({
   id: versionId,
   type: z.string().min(1).max(32),
-  javaVersion: z.object({ majorVersion: z.number().int().positive().max(100) }),
+  javaVersion: z.object({ majorVersion: z.number().int().positive().max(100) }).optional(),
   downloads: z.object({ server: serverDownloadSchema.optional() })
 })
 
@@ -58,7 +63,7 @@ async function fetchJson<T>(url: string, schema: z.ZodType<T>): Promise<T> {
   let response: Response
   try {
     response = await fetch(url, {
-      headers: { 'User-Agent': 'EmberHost/0.2.0' },
+      headers: { 'User-Agent': 'EmberHost/0.3.0' },
       redirect: 'error',
       signal: AbortSignal.timeout(20_000)
     })
@@ -103,13 +108,37 @@ async function resolveManifestRelease(manifest: VersionManifest, releaseId: stri
     throw new AppError(`Minecraft ${releaseId} does not provide a vanilla server download.`, 'SERVER_JAR_NOT_FOUND')
   }
   assertTrustedUrl(serverDownload.url)
+  const requiredJavaVersion = details.javaVersion?.majorVersion ??
+    (LEGACY_JAVA_8_RELEASES.has(releaseId) ? LEGACY_JAVA_VERSION : null)
+  if (requiredJavaVersion === null) {
+    throw new AppError(
+      `Mojang did not publish a Java requirement for Minecraft ${releaseId}.`,
+      'JAVA_VERSION_NOT_FOUND'
+    )
+  }
 
   return {
     id: releaseId,
     type: 'release',
-    requiredJavaVersion: details.javaVersion.majorVersion,
+    requiredJavaVersion,
     download: serverDownload
   }
+}
+
+export async function listOfficialReleases(): Promise<MinecraftReleaseInfo[]> {
+  const manifest = await fetchJson(VERSION_MANIFEST, versionManifestSchema)
+  return manifest.versions
+    .filter((version) => version.type === 'release')
+    .map((version) => {
+      const parsedId = versionId.safeParse(version.id)
+      if (!parsedId.success) throw new AppError('Mojang returned an invalid release ID.', 'INVALID_MOJANG_METADATA')
+      assertTrustedUrl(version.url)
+      return {
+        id: parsedId.data,
+        type: 'release' as const,
+        releaseTime: version.releaseTime
+      }
+    })
 }
 
 export async function resolveLatestRelease(): Promise<ResolvedServerVersion> {
@@ -120,8 +149,10 @@ export async function resolveLatestRelease(): Promise<ResolvedServerVersion> {
 }
 
 export async function resolveRelease(releaseId: string): Promise<ResolvedServerVersion> {
+  const parsedReleaseId = versionId.safeParse(releaseId)
+  if (!parsedReleaseId.success) throw new AppError('The Minecraft release ID is invalid.', 'INVALID_VERSION')
   const manifest = await fetchJson(VERSION_MANIFEST, versionManifestSchema)
-  return resolveManifestRelease(manifest, releaseId)
+  return resolveManifestRelease(manifest, parsedReleaseId.data)
 }
 
 export async function sha1File(filePath: string): Promise<string> {
@@ -157,7 +188,7 @@ export async function downloadServerJar(
   let response: Response
   try {
     response = await fetch(version.download.url, {
-      headers: { 'User-Agent': 'EmberHost/0.2.0' },
+      headers: { 'User-Agent': 'EmberHost/0.3.0' },
       redirect: 'error',
       signal: AbortSignal.timeout(120_000)
     })

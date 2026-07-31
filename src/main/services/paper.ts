@@ -95,7 +95,7 @@ async function fetchPaperBuilds(minecraftVersion: string): Promise<PaperBuildInf
   let response: Response
   try {
     response = await fetch(url, {
-      headers: { 'User-Agent': 'EmberHost/0.2.0' },
+      headers: { 'User-Agent': 'EmberHost/0.3.0' },
       redirect: 'error',
       signal: AbortSignal.timeout(20_000)
     })
@@ -198,7 +198,7 @@ export async function downloadPaperJar(
   let response: Response
   try {
     response = await fetch(build.download.url, {
-      headers: { 'User-Agent': 'EmberHost/0.2.0' },
+      headers: { 'User-Agent': 'EmberHost/0.3.0' },
       redirect: 'error',
       signal: AbortSignal.timeout(120_000)
     })

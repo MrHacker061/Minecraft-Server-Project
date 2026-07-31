@@ -24,8 +24,10 @@ import {
   MemoryStick,
   Network,
   OctagonX,
+  PackagePlus,
   Play,
   Plus,
+  Puzzle,
   Radius,
   RotateCcw,
   Rocket,
@@ -50,6 +52,10 @@ import type {
   CreateInstanceInput,
   ForceLoadedRegionsState,
   InstanceView,
+  LatestVersion,
+  MinecraftReleaseInfo,
+  PaperBuildInfo,
+  PaperPluginInfo,
   PerformancePreset,
   ServerSoftwareSelection,
   ServerStatus,
@@ -60,7 +66,7 @@ import type {
 } from '../../shared/contracts'
 import { PERFORMANCE_PROFILES, matchingPerformancePreset, profileValues } from '../../shared/performance'
 
-type ViewName = 'overview' | 'world' | 'console' | 'settings'
+type ViewName = 'overview' | 'world' | 'plugins' | 'console' | 'settings'
 type Toast = { id: number; kind: 'success' | 'error' | 'info'; message: string }
 
 type PaperCreateInput = CreateInstanceInput & {
@@ -189,11 +195,10 @@ interface SetupProps {
   creating: boolean
   error: string | null
   onClose: () => void
-  onRetryVersion: () => Promise<void>
   onCreate: (input: PaperCreateInput) => Promise<void>
 }
 
-function CreateServerDialog({ bootstrap, canClose, progress, creating, error, onClose, onRetryVersion, onCreate }: SetupProps): React.JSX.Element {
+function CreateServerDialog({ bootstrap, canClose, progress, creating, error, onClose, onCreate }: SetupProps): React.JSX.Element {
   const safeMemoryCap = Math.max(1024, Math.floor((bootstrap.totalMemoryMb - 2048) / 512) * 512)
   const recommendedMemory = Math.min(profileValues('balanced', bootstrap.totalMemoryMb).memoryMb, safeMemoryCap)
   const [step, setStep] = useState(0)
@@ -206,12 +211,66 @@ function CreateServerDialog({ bootstrap, canClose, progress, creating, error, on
   const [eulaAccepted, setEulaAccepted] = useState(false)
   const [software, setSoftware] = useState<'paper' | 'vanilla'>('paper')
   const [performancePreset, setPerformancePreset] = useState<Exclude<PerformancePreset, 'custom'>>('balanced')
+  const [releases, setReleases] = useState<MinecraftReleaseInfo[]>([])
+  const [selectedVersionId, setSelectedVersionId] = useState(bootstrap.latestVersion?.id ?? '')
+  const [selectedVersion, setSelectedVersion] = useState<LatestVersion | null>(bootstrap.latestVersion)
+  const [paperBuild, setPaperBuild] = useState<PaperBuildInfo | null>(bootstrap.latestPaperBuild)
+  const [releaseListError, setReleaseListError] = useState<string | null>(null)
+  const [releaseError, setReleaseError] = useState<string | null>(null)
+  const [paperError, setPaperError] = useState<string | null>(bootstrap.paperLookupError)
+  const [versionLoading, setVersionLoading] = useState(false)
+  const releaseRequest = useRef(0)
 
-  const paperBuild = bootstrap.latestPaperBuild
+  const loadReleases = async (): Promise<void> => {
+    setReleaseListError(null)
+    try {
+      const result = await window.emberHost.getMinecraftReleases()
+      setReleases(result)
+      if (!selectedVersionId && result[0]) setSelectedVersionId(result[0].id)
+    } catch (lookupError) {
+      setReleaseListError(friendlyError(lookupError))
+    }
+  }
+
+  const loadSelectedRelease = async (id: string): Promise<void> => {
+    if (!id) return
+    const request = ++releaseRequest.current
+    setVersionLoading(true)
+    setSelectedVersion(null)
+    setReleaseError(null)
+    setPaperError(null)
+    setPaperBuild(null)
+    try {
+      const release = await window.emberHost.getMinecraftRelease(id)
+      if (request !== releaseRequest.current) return
+      setSelectedVersion(release)
+      setVersionLoading(false)
+      try {
+        const build = await window.emberHost.getLatestPaperBuild(id)
+        if (request !== releaseRequest.current) return
+        setPaperBuild(build)
+      } catch (lookupError) {
+        if (request !== releaseRequest.current) return
+        setPaperError(friendlyError(lookupError))
+        setSoftware('vanilla')
+      }
+    } catch (lookupError) {
+      if (request !== releaseRequest.current) return
+      setSelectedVersion(null)
+      setReleaseError(friendlyError(lookupError))
+      setSoftware('vanilla')
+    } finally {
+      if (request === releaseRequest.current) setVersionLoading(false)
+    }
+  }
+
+  useEffect(() => { void loadReleases() }, [])
+  useEffect(() => { void loadSelectedRelease(selectedVersionId) }, [selectedVersionId])
+
   const softwareReady = software === 'vanilla' || paperBuild !== null && paperBuild !== undefined
-  const stepValid = step === 0 ? name.trim().length > 0 && motd.trim().length > 0 && softwareReady : step === 1
+  const stepValid = step === 0 ? name.trim().length > 0 && motd.trim().length > 0 && softwareReady && selectedVersion !== null && !versionLoading : step === 1
     ? memoryMb >= 1024 && port >= 1024 && port <= 65535 && maxPlayers >= 1
-    : eulaAccepted && bootstrap.latestVersion !== null
+    : eulaAccepted && selectedVersion !== null
 
   const submit = async (event: FormEvent): Promise<void> => {
     event.preventDefault()
@@ -220,7 +279,7 @@ function CreateServerDialog({ bootstrap, canClose, progress, creating, error, on
       return
     }
     if (!eulaAccepted) return
-    const version = bootstrap.latestVersion?.id
+    const version = selectedVersion?.id
     if (!version) return
     const selectedSoftware: ServerSoftwareSelection = software === 'paper' && paperBuild
       ? { kind: 'paper', build: paperBuild.build }
@@ -275,8 +334,8 @@ function CreateServerDialog({ bootstrap, canClose, progress, creating, error, on
               <label className="field"><span>Message of the day</span><input value={motd} maxLength={120} onChange={(event) => setMotd(event.target.value)} /></label>
               <fieldset className="choice-fieldset software-choices">
                 <legend>Server software</legend>
-                <label className={`choice-card software-card ${software === 'paper' ? 'selected' : ''}`}>
-                  <input type="radio" name="software" value="paper" checked={software === 'paper'} onChange={() => setSoftware('paper')} />
+                <label className={`choice-card software-card ${software === 'paper' ? 'selected' : ''} ${!paperBuild || versionLoading ? 'disabled' : ''}`}>
+                  <input type="radio" name="software" value="paper" checked={software === 'paper'} disabled={!paperBuild || versionLoading} onChange={() => setSoftware('paper')} />
                   <span className="choice-icon"><Rocket size={20} /></span>
                   <span className="choice-copy"><strong>Paper</strong><small>Faster, configurable, plugin-ready</small></span>
                   <span className="recommended-tag">Recommended</span>
@@ -289,12 +348,26 @@ function CreateServerDialog({ bootstrap, canClose, progress, creating, error, on
                   <span className="choice-check" aria-hidden="true">{software === 'vanilla' && <Check size={13} />}</span>
                 </label>
               </fieldset>
-              <div className="version-strip">
-                <span>Release</span><strong>Minecraft {bootstrap.latestVersion?.id ?? 'Unavailable'}</strong>
-                <small>{software === 'paper'
-                  ? paperBuild ? `Paper build ${paperBuild.build} · Requires Java ${bootstrap.latestVersion?.requiredJavaVersion ?? '—'}` : bootstrap.paperLookupError ?? 'Finding the recommended Paper build…'
-                  : bootstrap.latestVersion ? `Official Mojang server · Requires Java ${bootstrap.latestVersion.requiredJavaVersion}` : bootstrap.versionLookupError}</small>
-                {(!bootstrap.latestVersion || software === 'paper' && !paperBuild) && <button type="button" onClick={() => void onRetryVersion()}><RotateCcw size={12} /> Retry lookup</button>}
+              <div className="release-picker">
+                <label className="field">
+                  <span>Minecraft release <strong>{selectedVersionId === bootstrap.latestVersion?.id ? 'Latest' : 'Official release'}</strong></span>
+                  <select aria-label="Minecraft release" value={selectedVersionId} disabled={creating || !selectedVersionId} onChange={(event) => setSelectedVersionId(event.target.value)}>
+                    {!releases.length && selectedVersionId && <option value={selectedVersionId}>{selectedVersionId}</option>}
+                    {releases.map((release) => <option value={release.id} key={release.id}>{release.id}{release.id === bootstrap.latestVersion?.id ? ' — Latest' : ''}</option>)}
+                  </select>
+                </label>
+                <div className={`version-strip ${releaseError ? 'version-error' : ''}`}>
+                  <span>{versionLoading ? 'Checking release' : releaseError ? 'Unavailable' : 'Selected release'}</span>
+                  <strong>{versionLoading ? 'Reading Mojang metadata…' : `Minecraft ${selectedVersion?.id ?? (selectedVersionId || 'Unavailable')}`}</strong>
+                  <small>{releaseError ?? (selectedVersion
+                    ? software === 'paper' && paperBuild
+                      ? `Paper build ${paperBuild.build} · Requires Java ${selectedVersion.requiredJavaVersion}`
+                      : `Official Mojang server · Requires Java ${selectedVersion.requiredJavaVersion}`
+                    : bootstrap.versionLookupError ?? 'Choose an official release.')}</small>
+                  {(releaseError || releaseListError) && <button type="button" onClick={() => { void loadReleases(); void loadSelectedRelease(selectedVersionId) }}><RotateCcw size={12} /> Retry lookup</button>}
+                </div>
+                {releaseListError && <div className="info-callout warning"><AlertTriangle size={17} /><div><strong>The release list could not refresh.</strong><span>{releaseListError}</span></div></div>}
+                {!versionLoading && paperError && software === 'vanilla' && <div className="info-callout neutral"><Info size={17} /><div><strong>Paper is not available for this release.</strong><span>Vanilla remains available. {paperError}</span></div></div>}
               </div>
             </div>
           )}
@@ -322,7 +395,7 @@ function CreateServerDialog({ bootstrap, canClose, progress, creating, error, on
                 <label className="field"><span>Server port</span><input type="number" min="1024" max="65535" value={port} onChange={(event) => setPort(Number(event.target.value))} /><small>25565 is the Minecraft default</small></label>
                 <label className="field"><span>Player limit</span><input type="number" min="1" max="1000" value={maxPlayers} onChange={(event) => setMaxPlayers(Number(event.target.value))} /></label>
               </div>
-              <label className="field"><span>Java executable</span><input value={javaPath} maxLength={500} onChange={(event) => setJavaPath(event.target.value)} /><small>{bootstrap.java.available ? `${bootstrap.java.versionText} detected` : 'Java was not detected. Enter the full executable path.'}</small></label>
+              <label className="field"><span>Java executable</span><input value={javaPath} maxLength={500} onChange={(event) => setJavaPath(event.target.value)} /><small>{selectedVersion ? `Minecraft ${selectedVersion.id} expects Java ${selectedVersion.requiredJavaVersion}. ` : ''}{bootstrap.java.available ? `${bootstrap.java.versionText} detected.` : 'Java was not detected. Enter the full executable path.'}</small></label>
               <div className="info-callout"><Network size={18} /><div><strong>Starting locally is automatic.</strong><span>Public internet access may still need a firewall rule and router port forwarding. EmberHost will not change those without you.</span></div></div>
             </div>
           )}
@@ -332,7 +405,7 @@ function CreateServerDialog({ bootstrap, canClose, progress, creating, error, on
               <div className="form-heading"><span>03</span><div><h3>Ready to create</h3><p>One last check before the download begins.</p></div></div>
               <div className="review-card">
                 <div><span>Server</span><strong>{name}</strong></div><div><span>Software</span><strong>{software === 'paper' ? `Paper build ${paperBuild?.build ?? '—'}` : 'Vanilla'}</strong></div>
-                <div><span>Release</span><strong>Minecraft {bootstrap.latestVersion?.id ?? '—'}</strong></div><div><span>Profile</span><strong>{presetOptions.find((preset) => preset.id === performancePreset)?.label}</strong></div>
+                <div><span>Release</span><strong>Minecraft {selectedVersion?.id ?? '—'}</strong></div><div><span>Profile</span><strong>{presetOptions.find((preset) => preset.id === performancePreset)?.label}</strong></div>
                 <div><span>Memory</span><strong>{(memoryMb / 1024).toFixed(1)} GB</strong></div><div><span>Address</span><strong>localhost:{port}</strong></div>
                 <div><span>Players</span><strong>Up to {maxPlayers}</strong></div><div><span>Authentication</span><strong>Online mode</strong></div>
               </div>
@@ -609,6 +682,59 @@ function WorldToolsView({
   )
 }
 
+function PluginsView({ instance, plugins, loading, busy, onInstall, onRemove, onRefresh, onCreatePaper }: {
+  instance: InstanceView
+  plugins: PaperPluginInfo[]
+  loading: boolean
+  busy: boolean
+  onInstall: () => void
+  onRemove: (fileName: string) => void
+  onRefresh: () => void
+  onCreatePaper: () => void
+}): React.JSX.Element {
+  const paper = instanceSoftware(instance).kind === 'paper'
+  const active = instance.runtime.status !== 'offline' && instance.runtime.status !== 'crashed'
+  return (
+    <div className="page-content plugins-content">
+      {!paper && (
+        <section className="paper-gate" role="note">
+          <div className="paper-gate-icon"><Puzzle size={25} /></div>
+          <div><span className="eyebrow">Paper plugin support</span><h2>Plugins need a Paper server.</h2><p>Your Vanilla world stays unchanged. Create a Paper server to install Bukkit, Spigot, and Paper plugin JARs.</p></div>
+          <button className="button primary" onClick={onCreatePaper}><Plus size={16} /> New Paper server</button>
+        </section>
+      )}
+
+      <section className={`plugin-panel ${!paper ? 'paper-disabled' : ''}`} aria-disabled={!paper}>
+        <div className="plugin-heading">
+          <div><span className="panel-icon"><Puzzle size={19} /></span><div><span className="eyebrow">Local plugin library</span><h2>Paper plugins</h2><p>Add a plugin JAR from this computer, then start Paper to load it.</p></div></div>
+          <div className="plugin-heading-actions">
+            <button className="icon-button" aria-label="Refresh plugin list" title="Refresh plugin list" disabled={!paper || loading || busy} onClick={onRefresh}><RotateCcw className={loading ? 'spin' : ''} size={17} /></button>
+            <button className="button primary" disabled={!paper || active || busy} onClick={onInstall}>{busy ? <LoaderCircle className="spin" size={16} /> : <PackagePlus size={16} />} Add plugin JAR</button>
+          </div>
+        </div>
+
+        <div className="tool-callout amber"><ShieldAlert size={17} /><div><strong>Plugins run with the same access as your server.</strong><span>Only install JARs from developers you trust, and choose a release compatible with Minecraft {instance.version} and Paper.</span></div></div>
+        {paper && active && <div className="tool-callout neutral"><Info size={17} /><div><strong>Stop Paper to change plugins.</strong><span>Installed plugins are loaded the next time the server starts.</span></div></div>}
+
+        <div className="plugin-list" aria-label="Installed Paper plugins" aria-busy={loading}>
+          <div className="plugin-list-title"><div><strong>Installed</strong><span>{plugins.length} plugin{plugins.length === 1 ? '' : 's'}</span></div><span>Server: Minecraft {instance.version}</span></div>
+          {loading ? (
+            <div className="plugin-empty"><LoaderCircle className="spin" size={25} /><strong>Reading the plugins folder…</strong></div>
+          ) : plugins.length ? plugins.map((plugin) => (
+            <article className="plugin-row" key={plugin.fileName}>
+              <span className={`plugin-icon ${plugin.builtIn ? 'built-in' : ''}`}><Puzzle size={18} /></span>
+              <div className="plugin-copy"><div><strong>{plugin.name ?? plugin.fileName.replace(/\.jar$/i, '')}</strong>{plugin.builtIn && <span className="plugin-badge">EmberHost built-in</span>}{!plugin.managed && <span className="plugin-badge neutral">External</span>}</div><span>{plugin.fileName}{plugin.version ? ` · version ${plugin.version}` : ''} · {formatBytes(plugin.sizeBytes)}</span></div>
+              <button className="button danger compact" disabled={active || busy || plugin.builtIn} title={plugin.builtIn ? 'Chunky powers World Preparation and cannot be removed.' : 'Move this plugin to Trash'} onClick={() => onRemove(plugin.fileName)}><Trash2 size={15} /> Remove</button>
+            </article>
+          )) : (
+            <div className="plugin-empty"><Puzzle size={27} /><strong>No optional plugins installed</strong><span>Choose Add plugin JAR to install one. Chunky appears here on Paper servers created by EmberHost.</span></div>
+          )}
+        </div>
+      </section>
+    </div>
+  )
+}
+
 function ConsoleView({ instance, logs, onSend }: {
   instance: InstanceView
   logs: ConsoleEntry[]
@@ -657,14 +783,16 @@ function ConsoleView({ instance, logs, onSend }: {
   )
 }
 
-function SettingsView({ instance, totalMemoryMb, appSettings, saving, appSettingsSaving, onSave, onAppSettings }: {
+function SettingsView({ instance, totalMemoryMb, appSettings, saving, appSettingsSaving, deleting, onSave, onAppSettings, onDeleteRequest }: {
   instance: InstanceView
   totalMemoryMb: number
   appSettings: AppSettings
   saving: boolean
   appSettingsSaving: boolean
+  deleting: boolean
   onSave: (input: UpdateInstanceInput) => Promise<void>
   onAppSettings: (value: AppSettings) => void
+  onDeleteRequest: () => void
 }): React.JSX.Element {
   const [form, setForm] = useState<UpdateInstanceInput>(() => ({
     id: instance.id,
@@ -750,8 +878,35 @@ function SettingsView({ instance, totalMemoryMb, appSettings, saving, appSetting
         </div>
       </section>
 
+      <section className="settings-section danger-zone">
+        <div className="settings-title"><span><Trash2 size={19} /></span><div><h3>Delete server</h3><p>Move this server, its world, backups, and plugins to the recycle bin.</p></div></div>
+        <div className="settings-fields danger-action"><div><strong>Delete {instance.name}</strong><span>Shared download caches are kept so other servers continue to work.</span></div><button type="button" className="button danger" disabled={active || saving || deleting} onClick={onDeleteRequest}><Trash2 size={16} /> Delete server</button></div>
+      </section>
+
       <div className="save-bar"><span>{active ? 'Configuration is locked while the server is active.' : 'Unknown server.properties entries will be preserved.'}</span><button className="button primary" disabled={saving || active}>{saving ? <LoaderCircle className="spin" size={17} /> : <Save size={17} />} Save changes</button></div>
     </form>
+  )
+}
+
+function DeleteServerDialog({ instance, deleting, onCancel, onConfirm }: {
+  instance: InstanceView
+  deleting: boolean
+  onCancel: () => void
+  onConfirm: (confirmationName: string) => void
+}): React.JSX.Element {
+  const [confirmationName, setConfirmationName] = useState('')
+  const matches = confirmationName === instance.name
+  return (
+    <div className="dialog-backdrop danger-backdrop">
+      <form className="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="delete-server-title" onSubmit={(event) => { event.preventDefault(); if (matches && !deleting) onConfirm(confirmationName) }}>
+        <span className="confirm-icon"><Trash2 size={23} /></span>
+        <span className="eyebrow">Recoverable deletion</span>
+        <h2 id="delete-server-title">Delete {instance.name}?</h2>
+        <p>EmberHost will move the entire server folder—including worlds, backups, logs, and plugins—to your recycle bin. The server must be stopped.</p>
+        <label className="field"><span>Enter <strong>{instance.name}</strong> to confirm</span><input autoFocus value={confirmationName} disabled={deleting} onChange={(event) => setConfirmationName(event.target.value)} /></label>
+        <div className="confirm-actions"><button type="button" className="button secondary" disabled={deleting} onClick={onCancel}>Cancel</button><button className="button danger" disabled={!matches || deleting}>{deleting ? <LoaderCircle className="spin" size={16} /> : <Trash2 size={16} />} Move to recycle bin</button></div>
+      </form>
+    </div>
   )
 }
 
@@ -768,9 +923,14 @@ export default function App(): React.JSX.Element {
   const [logs, setLogs] = useState<Record<string, ConsoleEntry[]>>({})
   const [worldPreparations, setWorldPreparations] = useState<Record<string, WorldPreparationState>>({})
   const [forceLoadedRegions, setForceLoadedRegions] = useState<Record<string, ForceLoadedRegionsState>>({})
+  const [paperPlugins, setPaperPlugins] = useState<Record<string, PaperPluginInfo[]>>({})
   const [busy, setBusy] = useState(false)
   const [worldBusy, setWorldBusy] = useState(false)
+  const [pluginLoading, setPluginLoading] = useState(false)
+  const [pluginBusy, setPluginBusy] = useState(false)
   const [saving, setSaving] = useState(false)
+  const [deleteTarget, setDeleteTarget] = useState<InstanceView | null>(null)
+  const [deleting, setDeleting] = useState(false)
   const [appSettingsSaving, setAppSettingsSaving] = useState(false)
   const [toasts, setToasts] = useState<Toast[]>([])
   const [now, setNow] = useState(Date.now())
@@ -780,6 +940,7 @@ export default function App(): React.JSX.Element {
   const selectedLogs = selected ? logs[selected.id] ?? [] : []
   const selectedPreparation = selected ? worldPreparations[selected.id] ?? emptyWorldPreparation(selected.id) : null
   const selectedForceLoads = selected ? forceLoadedRegions[selected.id] ?? emptyForceLoadedRegions(selected.id) : null
+  const selectedPlugins = selected ? paperPlugins[selected.id] ?? [] : []
   const selectedActive = selected?.runtime.status === 'online' || selected?.runtime.status === 'starting'
   const selectedStopping = selected?.runtime.status === 'stopping'
 
@@ -844,6 +1005,20 @@ export default function App(): React.JSX.Element {
       void paperApi.getForceLoadedRegions(selected.id).then((state) => setForceLoadedRegions((current) => ({ ...current, [selected.id]: state }))).catch(() => undefined)
     }
   }, [selected?.id])
+
+  useEffect(() => {
+    if (!selected || view !== 'plugins' || instanceSoftware(selected).kind !== 'paper') return
+    let cancelled = false
+    setPluginLoading(true)
+    void window.emberHost.getPaperPlugins(selected.id).then((plugins) => {
+      if (!cancelled) setPaperPlugins((current) => ({ ...current, [selected.id]: plugins }))
+    }).catch((error) => {
+      if (!cancelled) toast('error', friendlyError(error))
+    }).finally(() => {
+      if (!cancelled) setPluginLoading(false)
+    })
+    return () => { cancelled = true }
+  }, [selected?.id, view])
 
   const createInstance = async (input: PaperCreateInput): Promise<void> => {
     setCreating(true)
@@ -942,6 +1117,47 @@ export default function App(): React.JSX.Element {
     void runForceLoadAction((api, instanceId) => api.removeForceLoadedRegion({ instanceId, regionId }), 'Force-loaded region removed.')
   }
 
+  const refreshPaperPlugins = async (): Promise<void> => {
+    if (!selected || instanceSoftware(selected).kind !== 'paper') return
+    setPluginLoading(true)
+    try {
+      const plugins = await window.emberHost.getPaperPlugins(selected.id)
+      setPaperPlugins((current) => ({ ...current, [selected.id]: plugins }))
+    } catch (error) {
+      toast('error', friendlyError(error))
+    } finally {
+      setPluginLoading(false)
+    }
+  }
+
+  const installPaperPlugin = async (): Promise<void> => {
+    if (!selected || pluginBusy) return
+    setPluginBusy(true)
+    try {
+      const result = await window.emberHost.choosePaperPlugin(selected.id)
+      setPaperPlugins((current) => ({ ...current, [selected.id]: result.plugins }))
+      if (!result.canceled && result.installed) toast('success', `${result.installed.name ?? result.installed.fileName} was added. Start Paper to load it.`)
+    } catch (error) {
+      toast('error', friendlyError(error))
+    } finally {
+      setPluginBusy(false)
+    }
+  }
+
+  const removePaperPlugin = async (fileName: string): Promise<void> => {
+    if (!selected || pluginBusy) return
+    setPluginBusy(true)
+    try {
+      const plugins = await window.emberHost.removePaperPlugin({ instanceId: selected.id, fileName })
+      setPaperPlugins((current) => ({ ...current, [selected.id]: plugins }))
+      toast('success', `${fileName} was moved to the recycle bin.`)
+    } catch (error) {
+      toast('error', friendlyError(error))
+    } finally {
+      setPluginBusy(false)
+    }
+  }
+
   const saveSettings = async (input: UpdateInstanceInput): Promise<void> => {
     setSaving(true)
     try {
@@ -969,6 +1185,30 @@ export default function App(): React.JSX.Element {
     }).finally(() => setAppSettingsSaving(false))
   }
 
+  const deleteInstance = async (confirmationName: string): Promise<void> => {
+    if (!deleteTarget || deleting) return
+    const target = deleteTarget
+    setDeleting(true)
+    try {
+      await window.emberHost.deleteInstance({ id: target.id, confirmationName })
+      const remaining = instances.filter((instance) => instance.id !== target.id)
+      setInstances(remaining)
+      setSelectedId(remaining[0]?.id ?? null)
+      setLogs((current) => { const next = { ...current }; delete next[target.id]; return next })
+      setWorldPreparations((current) => { const next = { ...current }; delete next[target.id]; return next })
+      setForceLoadedRegions((current) => { const next = { ...current }; delete next[target.id]; return next })
+      setPaperPlugins((current) => { const next = { ...current }; delete next[target.id]; return next })
+      setDeleteTarget(null)
+      setView('overview')
+      if (!remaining.length) setShowCreate(true)
+      toast('success', `${target.name} was moved to the recycle bin.`)
+    } catch (error) {
+      toast('error', friendlyError(error))
+    } finally {
+      setDeleting(false)
+    }
+  }
+
   if (loadError) return <main className="fatal-screen"><AlertTriangle size={32} /><h1>EmberHost could not start</h1><p>{loadError}</p><button className="button secondary" onClick={() => location.reload()}><RotateCcw size={16} /> Try again</button></main>
   if (!bootstrap) return <LoadingScreen />
 
@@ -981,6 +1221,7 @@ export default function App(): React.JSX.Element {
           <span>Workspace</span>
           <button className={view === 'overview' ? 'active' : ''} onClick={() => setView('overview')}><LayoutDashboard size={18} /> Overview</button>
           <button className={view === 'world' ? 'active' : ''} onClick={() => setView('world')}><Map size={18} /> World tools {selected && instanceSoftware(selected).kind === 'paper' && <span className="nav-new">Paper</span>}</button>
+          <button className={view === 'plugins' ? 'active' : ''} onClick={() => setView('plugins')}><Puzzle size={18} /> Plugins {selected && instanceSoftware(selected).kind === 'paper' && <span className="nav-new">Paper</span>}</button>
           <button className={view === 'console' ? 'active' : ''} onClick={() => setView('console')}><SquareTerminal size={18} /> Console {selectedLogs.some((entry) => entry.level === 'error') && <i />}</button>
           <button className={view === 'settings' ? 'active' : ''} onClick={() => setView('settings')}><Settings size={18} /> Settings</button>
         </nav>
@@ -992,7 +1233,7 @@ export default function App(): React.JSX.Element {
 
       <main className="main-area">
         <header className="topbar">
-          <div><span className="eyebrow">{view === 'overview' ? 'Server workspace' : view === 'world' ? 'Paper operations' : view === 'console' ? 'Live operations' : 'Configuration'}</span><h1>{view === 'overview' ? selected?.name ?? 'Your server' : view === 'world' ? 'World tools' : view === 'console' ? 'Console' : 'Settings'}</h1></div>
+          <div><span className="eyebrow">{view === 'overview' ? 'Server workspace' : view === 'world' ? 'Paper operations' : view === 'plugins' ? 'Paper extensions' : view === 'console' ? 'Live operations' : 'Configuration'}</span><h1>{view === 'overview' ? selected?.name ?? 'Your server' : view === 'world' ? 'World tools' : view === 'plugins' ? 'Plugins' : view === 'console' ? 'Console' : 'Settings'}</h1></div>
           <div className="topbar-actions">
             {selected && <StatusBadge status={selected.runtime.status} />}
             {selected && <button className="icon-button" title="Open server folder" aria-label="Open server folder" onClick={() => void window.emberHost.openServerFolder(selected.id).catch((error) => toast('error', friendlyError(error)))}><FolderOpen size={18} /></button>}
@@ -1003,13 +1244,15 @@ export default function App(): React.JSX.Element {
 
         {selected ? (
           view === 'overview' ? <Overview instance={selected} address={`${bootstrap.lanAddresses[0] ?? 'localhost'}:${selected.port}`} logs={selectedLogs} now={now} busy={busy} onStartStop={() => void startStop()} onOpenFolder={() => void window.emberHost.openServerFolder(selected.id).catch((error) => toast('error', friendlyError(error)))} onCopy={() => { void navigator.clipboard.writeText(`${bootstrap.lanAddresses[0] ?? 'localhost'}:${selected.port}`).then(() => toast('info', 'Server address copied.')).catch((error) => toast('error', friendlyError(error))) }} onConsole={() => setView('console')} onWorld={() => setView('world')} />
-            : view === 'world' && selectedPreparation && selectedForceLoads ? <WorldToolsView key={selected.id} instance={selected} preparation={selectedPreparation} forceLoads={selectedForceLoads} busy={worldBusy} onStartPreparation={startWorldPreparation} onPausePreparation={pauseWorldPreparation} onResumePreparation={resumeWorldPreparation} onCancelPreparation={cancelWorldPreparation} onAddForceLoad={addForceLoadedRegion} onRemoveForceLoad={removeForceLoadedRegion} onCreatePaper={openCreate} />
-              : view === 'console' ? <ConsoleView key={selected.id} instance={selected} logs={selectedLogs} onSend={sendCommand} />
-                : <SettingsView instance={selected} totalMemoryMb={bootstrap.totalMemoryMb} appSettings={appSettings} saving={saving} appSettingsSaving={appSettingsSaving} onSave={saveSettings} onAppSettings={saveAppSettings} />
+             : view === 'world' && selectedPreparation && selectedForceLoads ? <WorldToolsView key={selected.id} instance={selected} preparation={selectedPreparation} forceLoads={selectedForceLoads} busy={worldBusy} onStartPreparation={startWorldPreparation} onPausePreparation={pauseWorldPreparation} onResumePreparation={resumeWorldPreparation} onCancelPreparation={cancelWorldPreparation} onAddForceLoad={addForceLoadedRegion} onRemoveForceLoad={removeForceLoadedRegion} onCreatePaper={openCreate} />
+              : view === 'plugins' ? <PluginsView key={selected.id} instance={selected} plugins={selectedPlugins} loading={pluginLoading} busy={pluginBusy} onInstall={() => void installPaperPlugin()} onRemove={(fileName) => void removePaperPlugin(fileName)} onRefresh={() => void refreshPaperPlugins()} onCreatePaper={openCreate} />
+               : view === 'console' ? <ConsoleView key={selected.id} instance={selected} logs={selectedLogs} onSend={sendCommand} />
+                : <SettingsView instance={selected} totalMemoryMb={bootstrap.totalMemoryMb} appSettings={appSettings} saving={saving} appSettingsSaving={appSettingsSaving} deleting={deleting} onSave={saveSettings} onAppSettings={saveAppSettings} onDeleteRequest={() => setDeleteTarget(selected)} />
         ) : <div className="empty-workspace"><div className="brand-mark large"><span>E</span></div><h2>Create your first server</h2><p>Start with recommended Paper performance or choose the official Vanilla experience.</p><button className="button primary" onClick={openCreate}><Plus size={17} /> Create a server</button></div>}
       </main>
 
-      {showCreate && <CreateServerDialog bootstrap={bootstrap} canClose={instances.length > 0} progress={createProgress} creating={creating} error={createError} onClose={() => setShowCreate(false)} onRetryVersion={refreshLatestVersion} onCreate={createInstance} />}
+      {showCreate && <CreateServerDialog bootstrap={bootstrap} canClose={instances.length > 0} progress={createProgress} creating={creating} error={createError} onClose={() => setShowCreate(false)} onCreate={createInstance} />}
+      {deleteTarget && <DeleteServerDialog instance={deleteTarget} deleting={deleting} onCancel={() => setDeleteTarget(null)} onConfirm={(confirmationName) => void deleteInstance(confirmationName)} />}
       <div className="toast-region" aria-live="polite">{toasts.map((item) => <div key={item.id} className={`toast toast-${item.kind}`}>{item.kind === 'error' ? <AlertTriangle size={17} /> : item.kind === 'success' ? <Check size={17} /> : <Clipboard size={17} />}<span>{item.message}</span></div>)}</div>
     </div>
   )

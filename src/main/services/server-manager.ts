@@ -157,6 +157,23 @@ export class ServerManager {
     return status === 'starting' || status === 'online' || status === 'stopping'
   }
 
+  async assertStoppedAndUnowned(instanceId: string): Promise<void> {
+    const instance = this.requireInstance(instanceId)
+    await this.markerCleanups.get(instanceId)
+    if (this.isActive(instanceId)) {
+      throw new AppError('Stop the server before deleting it.', 'SERVER_MUST_BE_STOPPED')
+    }
+    await this.assertNoOrphan(instance)
+  }
+
+  forgetInstance(instanceId: string): void {
+    if (this.processes.has(instanceId) || this.isActive(instanceId)) {
+      throw new AppError('A running server cannot be removed from EmberHost.', 'SERVER_MUST_BE_STOPPED')
+    }
+    this.runtimes.delete(instanceId)
+    this.logs.delete(instanceId)
+  }
+
   async start(instanceId: string): Promise<InstanceView> {
     return this.runExclusive(instanceId, async () => {
       if (this.shuttingDown) throw new AppError('EmberHost is shutting down and cannot start another server.', 'APP_SHUTTING_DOWN')

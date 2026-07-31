@@ -6,9 +6,10 @@ EmberHost is a desktop control panel for turning a personal computer into a self
 
 ## What works today
 
-- Creates isolated servers from the newest stable Minecraft release.
+- Lists every official Minecraft release in Mojang's manifest and creates any release for which Mojang publishes a server JAR.
 - Recommends the newest stable Paper build, resolved from Paper's live API.
 - Keeps Vanilla server creation available through Mojang's official metadata.
+- Resolves and verifies the exact selected release instead of silently substituting the newest version.
 - Downloads Paper, Vanilla, and Chunky only from allowlisted official hosts.
 - Verifies Paper with SHA-256, Vanilla with Mojang's SHA-1, and Chunky with SHA-512 plus the declared file size.
 - Resolves Minecraft's required Java major version instead of hardcoding it.
@@ -24,6 +25,8 @@ EmberHost is a desktop control panel for turning a personal computer into a self
 - Sends a graceful stop command before escalating after a timeout.
 - Streams output into a live console and a persistent, size-capped instance log.
 - Persists multiple server configurations with atomic, schema-versioned JSON.
+- Adds, inventories, and removes local Paper plugin JARs while the server is stopped.
+- Moves deleted server folders and removable plugins to the operating system recycle bin instead of permanently erasing them.
 - Preserves unknown comments and keys when updating server.properties.
 - Keeps running in the system tray when the window closes.
 - Keeps online mode enabled by default and never changes firewall or router settings automatically.
@@ -32,7 +35,9 @@ The tray process can run continuously while the desktop user remains signed in. 
 
 ## Paper, plugins, and mods
 
-Paper supports Bukkit, Spigot, and Paper plugins. EmberHost installs the verified Chunky Paper plugin automatically because the World Tools screen depends on it.
+Paper supports Bukkit, Spigot, and Paper plugins. EmberHost installs the verified Chunky Paper plugin automatically because the World Tools screen depends on it. The **Plugins** screen can then import additional local `.jar` files. EmberHost checks the archive structure, requires a root `plugin.yml` or `paper-plugin.yml`, enforces size and filename limits, and copies it atomically without loading or executing it. Stop Paper before adding or removing plugins; changes load on the next start.
+
+Plugins run with the same operating-system access as the Minecraft server. Only install plugins from developers you trust and confirm that the plugin supports the selected Minecraft and Paper versions. Chunky is protected from removal because World Preparation depends on it. Other removals go through the recycle bin.
 
 Paper is not a Fabric, Forge, or NeoForge mod loader. Mods that require one of those loaders are not supported yet. Adding true modpack support would require loader-specific installers, dependency and version resolution, mod provenance and checksum tracking, per-loader launch rules, compatibility warnings, and safer update workflows.
 
@@ -82,12 +87,17 @@ pnpm dist       # platform installer
 
 ## Create and optimize a server
 
-1. Launch EmberHost and choose a server name.
-2. Keep Paper selected for the recommended experience, or choose Vanilla.
-3. Select a performance profile and review Java, memory, player limit, and port.
+1. Launch EmberHost, choose a server name, and select an official Minecraft release.
+2. Keep Paper selected when a stable build exists for that release, or choose Vanilla.
+3. Select a performance profile and review the required Java version, memory, player limit, and port.
 4. Read and explicitly accept the [Minecraft EULA](https://www.minecraft.net/en-us/eula).
 5. Select **Download & create**, then start the server.
-6. Open **World Tools** on a Paper server to prepare terrain or add small force-loaded regions.
+6. Open **Plugins** on a stopped Paper server to add a trusted plugin JAR.
+7. Open **World Tools** on a Paper server to prepare terrain or add small force-loaded regions.
+
+Mojang's manifest includes a few very early client releases for which it no longer publishes a server artifact. EmberHost shows those releases but refuses creation with a clear message rather than downloading an unofficial or unverifiable JAR.
+
+To delete a server, stop it, open **Settings**, choose **Delete server**, and enter the server name exactly. EmberHost validates that the folder is one of its managed UUID directories, checks for live or orphaned Java processes, and then moves the complete folder to the recycle bin. Shared download caches are preserved.
 
 Players on the same machine can use localhost:25565. Other devices on the LAN should use the host computer's private IP. Public hosting commonly requires a firewall rule, router port forwarding, and a public IP that is not behind CGNAT. EmberHost does not silently make those security-sensitive changes.
 
@@ -105,7 +115,9 @@ Machine-local data root/
    └─ <instance-uuid>/
       ├─ paper.jar or server.jar
       ├─ plugins/
-      │  └─ Chunky.jar
+      │  ├─ Chunky.jar
+      │  ├─ <additional-plugin>.jar
+      │  └─ .emberhost-plugins.json
       ├─ server.properties
       ├─ eula.txt
       ├─ emberhost-instance.json
@@ -134,10 +146,11 @@ Electron main process
     ├─ instance service ── Mojang, Paper, and Modrinth metadata/downloads
     ├─ server manager ──── Java lifecycle, console, and health samples
     ├─ world service ───── backups, Chunky tasks, and bounded force-loads
+    ├─ plugin service ──── JAR validation, inventory, and recycle-bin removal
     └─ atomic store ────── app data and per-instance metadata
 ~~~
 
-Safeguards include contextIsolation, disabled Node integration, renderer sandboxing, denied navigation and popups, a restrictive CSP, IPC sender checks, Zod validation, UUID server directories, shell-free process spawning, atomic state writes, checksum verification, strict download hosts, redirect rejection, bounded streams, and conservative orphan-process detection.
+Safeguards include contextIsolation, disabled Node integration, renderer sandboxing, denied navigation and popups, a restrictive CSP, IPC sender checks, Zod validation, UUID server directories, shell-free process spawning, atomic state writes, checksum verification, strict download hosts, redirect rejection, bounded streams, conservative orphan-process detection, archive validation, and recoverable deletion.
 
 ## Upstream software and licensing
 

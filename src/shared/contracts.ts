@@ -112,6 +112,12 @@ export interface LatestVersion {
   requiredJavaVersion: number
 }
 
+export interface MinecraftReleaseInfo {
+  id: string
+  type: 'release'
+  releaseTime: string
+}
+
 export interface BootstrapData {
   instances: InstanceView[]
   settings: AppSettings
@@ -138,6 +144,32 @@ export interface CreateInstanceInput {
   software?: ServerSoftwareSelection
   performancePreset?: PerformancePreset
   eulaAccepted: true
+}
+
+export interface DeleteInstanceInput {
+  id: string
+  confirmationName: string
+}
+
+export interface PaperPluginInfo {
+  fileName: string
+  name: string | null
+  version: string | null
+  sizeBytes: number
+  installedAt: string | null
+  managed: boolean
+  builtIn: boolean
+}
+
+export interface PluginInstallResult {
+  canceled: boolean
+  installed: PaperPluginInfo | null
+  plugins: PaperPluginInfo[]
+}
+
+export interface RemovePaperPluginInput {
+  instanceId: string
+  fileName: string
 }
 
 export interface UpdateInstanceInput {
@@ -182,10 +214,13 @@ export interface EmberHostApi {
   getBootstrap: () => Promise<BootstrapData>
   refreshInstances: () => Promise<InstanceView[]>
   getLatestVersion: () => Promise<LatestVersion>
+  getMinecraftReleases: () => Promise<MinecraftReleaseInfo[]>
+  getMinecraftRelease: (minecraftVersion: string) => Promise<LatestVersion>
   getLatestPaperBuild: (minecraftVersion: string) => Promise<PaperBuildInfo>
   checkJava: (javaPath?: string) => Promise<JavaStatus>
   createInstance: (input: CreateInstanceInput) => Promise<InstanceView>
   updateInstance: (input: UpdateInstanceInput) => Promise<InstanceView>
+  deleteInstance: (input: DeleteInstanceInput) => Promise<void>
   startInstance: (id: string) => Promise<InstanceView>
   stopInstance: (id: string) => Promise<InstanceView>
   sendCommand: (id: string, command: string) => Promise<void>
@@ -201,6 +236,9 @@ export interface EmberHostApi {
   getForceLoadedRegions: (id: string) => Promise<ForceLoadedRegionsState>
   addForceLoadedRegion: (input: AddForceLoadedRegionInput) => Promise<ForceLoadedRegionsState>
   removeForceLoadedRegion: (input: RemoveForceLoadedRegionInput) => Promise<ForceLoadedRegionsState>
+  getPaperPlugins: (id: string) => Promise<PaperPluginInfo[]>
+  choosePaperPlugin: (id: string) => Promise<PluginInstallResult>
+  removePaperPlugin: (input: RemovePaperPluginInput) => Promise<PaperPluginInfo[]>
   onSetupProgress: (listener: (progress: SetupProgress) => void) => () => void
   onConsoleEntry: (listener: (entry: ConsoleEntry) => void) => () => void
   onStateChange: (listener: (event: StateEvent) => void) => () => void

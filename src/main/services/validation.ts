@@ -15,10 +15,11 @@ const serverSoftware = z.discriminatedUnion('kind', [
 ])
 
 export const instanceIdSchema = z.string().uuid()
+export const minecraftVersionSchema = z.string().trim().min(1).max(64).regex(/^[A-Za-z0-9._-]+$/, 'Invalid Minecraft version.')
 
 export const createInstanceSchema = z.object({
   name: serverName,
-  version: z.string().trim().min(1).max(64).regex(/^[A-Za-z0-9._-]+$/, 'Invalid Minecraft version.'),
+  version: minecraftVersionSchema,
   memoryMb: z.number().int().min(1024).max(65536),
   port: z.number().int().min(1024).max(65535),
   maxPlayers: z.number().int().min(1).max(1000),
@@ -27,6 +28,17 @@ export const createInstanceSchema = z.object({
   software: serverSoftware.optional(),
   performancePreset: performancePreset.optional(),
   eulaAccepted: z.literal(true)
+})
+
+export const deleteInstanceSchema = z.object({
+  id: instanceIdSchema,
+  confirmationName: serverName
+})
+
+export const removePaperPluginSchema = z.object({
+  instanceId: instanceIdSchema,
+  fileName: z.string().min(5).max(240)
+    .regex(/^[^<>:"/\\|?*\u0000-\u001f]+\.jar$/i, 'Invalid plugin file name.')
 })
 
 export const updateInstanceSchema = z.object({

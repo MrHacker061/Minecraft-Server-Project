@@ -54,6 +54,48 @@ describe('AppStore', () => {
     expect(JSON.parse(await readFile(join(directory, 'emberhost.json'), 'utf8')).schemaVersion).toBe(2)
   })
 
+  it('removes an instance transactionally and persists the removal', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'emberhost-store-'))
+    temporaryDirectories.push(directory)
+    const store = new AppStore(directory)
+    await store.load()
+    const id = '135e55f5-f8a2-485c-b934-8a5ee9a4dd6d'
+    const instance: ServerInstance = {
+      id,
+      name: 'Delete me',
+      version: '26.2',
+      serverDirectory: join(directory, 'servers', id),
+      software: { kind: 'vanilla' },
+      launchArtifact: 'server.jar',
+      jarSha1: 'abc',
+      artifactSha256: null,
+      requiredJavaVersion: 25,
+      javaPath: 'java',
+      port: 25565,
+      memoryMb: 4096,
+      maxPlayers: 20,
+      motd: 'Hello',
+      gameMode: 'survival',
+      difficulty: 'normal',
+      onlineMode: true,
+      viewDistance: 10,
+      simulationDistance: 10,
+      performancePreset: 'balanced',
+      eulaAcceptedAt: '2026-07-31T00:00:00.000Z',
+      createdAt: '2026-07-31T00:00:00.000Z',
+      updatedAt: '2026-07-31T00:00:00.000Z'
+    }
+    await store.addInstance(instance)
+
+    await expect(store.removeInstance(id)).resolves.toMatchObject({ id, name: 'Delete me' })
+    expect(store.getInstance(id)).toBeUndefined()
+
+    const reloaded = new AppStore(directory)
+    await reloaded.load()
+    expect(reloaded.getInstance(id)).toBeUndefined()
+    await expect(store.removeInstance(id)).rejects.toMatchObject({ code: 'INSTANCE_NOT_FOUND' })
+  })
+
   it('migrates schema v1 vanilla instances without quarantining or losing them', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'emberhost-store-'))
     temporaryDirectories.push(directory)

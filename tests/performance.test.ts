@@ -432,4 +432,18 @@ describe('managed force-loaded region bounds', () => {
     expect(await service.getForceLoadedRegions(INSTANCE_ID)).toMatchObject({ totalChunks: 9 })
     expect((await service.getForceLoadedRegions(INSTANCE_ID)).regions).toHaveLength(1)
   })
+
+  it('blocks new world operations while instance deletion owns the per-server barrier', async () => {
+    const { service } = await harness()
+
+    await service.beginInstanceDeletion(INSTANCE_ID)
+    await expect(service.getWorldPreparation(INSTANCE_ID)).rejects.toMatchObject({ code: 'INSTANCE_DELETING' })
+
+    service.abortInstanceDeletion(INSTANCE_ID)
+    await expect(service.getWorldPreparation(INSTANCE_ID)).resolves.toMatchObject({ instanceId: INSTANCE_ID })
+
+    await service.beginInstanceDeletion(INSTANCE_ID)
+    service.completeInstanceDeletion(INSTANCE_ID)
+    await expect(service.getForceLoadedRegions(INSTANCE_ID)).rejects.toMatchObject({ code: 'INSTANCE_DELETING' })
+  })
 })
