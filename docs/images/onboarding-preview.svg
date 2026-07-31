@@ -8,7 +8,8 @@
   <rect width="1200" height="650" rx="20" fill="url(#bg)"/>
   <rect x="115" y="70" width="970" height="510" rx="14" fill="#171e27" stroke="#33404b"/>
   <path d="M129 70h286v510H129a14 14 0 0 1-14-14V84a14 14 0 0 1 14-14Z" fill="url(#side)"/>
-  <rect x="145" y="103" width="38" height="38" rx="9" fill="#58c878"/><text x="164" y="129" text-anchor="middle" fill="#0d1512" font-family="Segoe UI, sans-serif" font-size="20" font-weight="800">E</text>
+  <rect x="145" y="103" width="38" height="38" rx="9" fill="#58c878"/>
+  <g fill="none" stroke="#0b1811" stroke-width="2.3"><ellipse cx="164" cy="122" rx="11.5" ry="4.6"/><ellipse cx="164" cy="122" rx="11.5" ry="4.6" transform="rotate(60 164 122)"/><ellipse cx="164" cy="122" rx="11.5" ry="4.6" transform="rotate(120 164 122)"/></g><circle cx="164" cy="122" r="2.1" fill="#0b1811"/>
   <text x="195" y="119" fill="#f2f5f7" font-family="Segoe UI, sans-serif" font-size="16" font-weight="700">EmberHost</text><text x="195" y="137" fill="#74808d" font-family="Segoe UI, sans-serif" font-size="10">Server manager</text>
   <text x="145" y="230" fill="#58c878" font-family="Segoe UI, sans-serif" font-size="10" font-weight="700" letter-spacing="1.5">QUICK SETUP</text>
   <text x="145" y="270" fill="#f2f5f7" font-family="Segoe UI, sans-serif" font-size="27" font-weight="750">Build a world that</text><text x="145" y="303" fill="#f2f5f7" font-family="Segoe UI, sans-serif" font-size="27" font-weight="750">stays yours.</text>

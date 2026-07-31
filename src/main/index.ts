@@ -67,6 +67,7 @@ function createMainWindow(): void {
     minHeight: 700,
     show: false,
     title: 'EmberHost',
+    icon: createBrandImage(32),
     backgroundColor: '#0d1117',
     autoHideMenuBar: true,
     webPreferences: {
@@ -116,13 +117,19 @@ function runtimeDataDirectory(): string {
   return join(app.getPath('userData'), 'runtime-data')
 }
 
-function createTrayImage(): Electron.NativeImage {
+function createBrandImage(size: number): Electron.NativeImage {
   const svg = `
     <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32">
-      <rect width="32" height="32" rx="7" fill="#58c878"/>
-      <path d="M8 9h16v5H13v3h9v5h-9v2H8V9Z" fill="#0d1512"/>
+      <defs><linearGradient id="ember" x1="5" y1="3" x2="28" y2="30" gradientUnits="userSpaceOnUse"><stop stop-color="#78e69a"/><stop offset="1" stop-color="#45b968"/></linearGradient></defs>
+      <rect x="1" y="1" width="30" height="30" rx="7" fill="url(#ember)" stroke="#a9f4be" stroke-opacity=".42"/>
+      <g fill="none" stroke="#0b1811" stroke-width="1.8">
+        <ellipse cx="16" cy="16" rx="9.3" ry="3.8"/>
+        <ellipse cx="16" cy="16" rx="9.3" ry="3.8" transform="rotate(60 16 16)"/>
+        <ellipse cx="16" cy="16" rx="9.3" ry="3.8" transform="rotate(120 16 16)"/>
+      </g>
+      <circle cx="16" cy="16" r="1.65" fill="#0b1811"/>
     </svg>`
-  return nativeImage.createFromDataURL(`data:image/svg+xml;base64,${Buffer.from(svg).toString('base64')}`).resize({ width: 16, height: 16 })
+  return nativeImage.createFromDataURL(`data:image/svg+xml;base64,${Buffer.from(svg).toString('base64')}`).resize({ width: size, height: size })
 }
 
 function rebuildTrayMenu(): void {
@@ -168,7 +175,7 @@ function rebuildTrayMenu(): void {
 }
 
 function createTray(): void {
-  tray = new Tray(createTrayImage())
+  tray = new Tray(createBrandImage(16))
   tray.setToolTip('EmberHost')
   tray.on('double-click', showWindow)
   rebuildTrayMenu()

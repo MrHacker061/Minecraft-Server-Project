@@ -1,13 +1,5 @@
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Drawing
-Add-Type @'
-using System;
-using System.Runtime.InteropServices;
-public static class EmberHostIconNative {
-  [DllImport("user32.dll", CharSet = CharSet.Auto)]
-  public static extern bool DestroyIcon(IntPtr handle);
-}
-'@
 
 $outputDirectory = Join-Path $PSScriptRoot '..\build'
 New-Item -ItemType Directory -Force -Path $outputDirectory | Out-Null
@@ -38,36 +30,69 @@ $gradient = New-Object System.Drawing.Drawing2D.LinearGradientBrush(
 )
 $graphics.FillPath($gradient, $shape)
 
-$pixelBrush = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(35, 13, 21, 18))
-$graphics.FillRectangle($pixelBrush, 381, 83, 44, 44)
-$graphics.FillRectangle($pixelBrush, 86, 388, 34, 34)
-$graphics.FillRectangle($pixelBrush, 413, 358, 22, 22)
+$innerBorder = New-Object System.Drawing.Pen ([System.Drawing.Color]::FromArgb(90, 196, 255, 211)), 3
+$graphics.DrawPath($innerBorder, $shape)
 
-$font = New-Object System.Drawing.Font 'Segoe UI', 244, ([System.Drawing.FontStyle]::Bold), ([System.Drawing.GraphicsUnit]::Pixel)
-$textBrush = New-Object System.Drawing.SolidBrush ([System.Drawing.ColorTranslator]::FromHtml('#0d1512'))
-$format = New-Object System.Drawing.StringFormat
-$format.Alignment = [System.Drawing.StringAlignment]::Center
-$format.LineAlignment = [System.Drawing.StringAlignment]::Center
-$graphics.DrawString('E', $font, $textBrush, (New-Object System.Drawing.RectangleF 31, 12, 450, 472), $format)
+$orbitPen = New-Object System.Drawing.Pen ([System.Drawing.ColorTranslator]::FromHtml('#0b1811')), 24
+foreach ($angle in @(0, 60, 120)) {
+  $state = $graphics.Save()
+  $graphics.TranslateTransform(256, 256)
+  $graphics.RotateTransform($angle)
+  $graphics.DrawEllipse($orbitPen, -142, -58, 284, 116)
+  $graphics.Restore($state)
+}
+$coreBrush = New-Object System.Drawing.SolidBrush ([System.Drawing.ColorTranslator]::FromHtml('#0b1811'))
+$graphics.FillEllipse($coreBrush, 231, 231, 50, 50)
 
 $pngPath = Join-Path $outputDirectory 'icon.png'
 $canvas.Save($pngPath, [System.Drawing.Imaging.ImageFormat]::Png)
 
-$small = New-Object System.Drawing.Bitmap $canvas, 256, 256
-$iconHandle = $small.GetHicon()
-$icon = [System.Drawing.Icon]::FromHandle($iconHandle)
 $iconPath = Join-Path $outputDirectory 'icon.ico'
-$stream = [System.IO.File]::Open($iconPath, [System.IO.FileMode]::Create)
-$icon.Save($stream)
-$stream.Close()
-[EmberHostIconNative]::DestroyIcon($iconHandle) | Out-Null
+$iconSizes = @(16, 24, 32, 48, 64, 128, 256)
+$frames = @()
+foreach ($size in $iconSizes) {
+  $frame = New-Object System.Drawing.Bitmap $size, $size, ([System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
+  $frameGraphics = [System.Drawing.Graphics]::FromImage($frame)
+  $frameGraphics.CompositingMode = [System.Drawing.Drawing2D.CompositingMode]::SourceCopy
+  $frameGraphics.CompositingQuality = [System.Drawing.Drawing2D.CompositingQuality]::HighQuality
+  $frameGraphics.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+  $frameGraphics.PixelOffsetMode = [System.Drawing.Drawing2D.PixelOffsetMode]::HighQuality
+  $frameGraphics.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::HighQuality
+  $frameGraphics.DrawImage($canvas, 0, 0, $size, $size)
+  $memory = New-Object System.IO.MemoryStream
+  $frame.Save($memory, [System.Drawing.Imaging.ImageFormat]::Png)
+  $frames += ,$memory.ToArray()
+  $memory.Dispose()
+  $frameGraphics.Dispose()
+  $frame.Dispose()
+}
 
-$icon.Dispose()
-$small.Dispose()
-$format.Dispose()
-$font.Dispose()
-$textBrush.Dispose()
-$pixelBrush.Dispose()
+$stream = [System.IO.File]::Open($iconPath, [System.IO.FileMode]::Create)
+$writer = New-Object System.IO.BinaryWriter $stream
+$writer.Write([UInt16]0)
+$writer.Write([UInt16]1)
+$writer.Write([UInt16]$iconSizes.Count)
+$offset = 6 + 16 * $iconSizes.Count
+for ($index = 0; $index -lt $iconSizes.Count; $index++) {
+  $size = $iconSizes[$index]
+  $bytes = $frames[$index]
+  $writer.Write([byte]$(if ($size -eq 256) { 0 } else { $size }))
+  $writer.Write([byte]$(if ($size -eq 256) { 0 } else { $size }))
+  $writer.Write([byte]0)
+  $writer.Write([byte]0)
+  $writer.Write([UInt16]1)
+  $writer.Write([UInt16]32)
+  $writer.Write([UInt32]$bytes.Length)
+  $writer.Write([UInt32]$offset)
+  $offset += $bytes.Length
+}
+foreach ($bytes in $frames) { $writer.Write([byte[]]$bytes) }
+$writer.Dispose()
+$stream.Dispose()
+
+$coreBrush.Dispose()
+$orbitPen.Dispose()
+$innerBorder.Dispose()
 $gradient.Dispose()
 $shape.Dispose()
 $graphics.Dispose()

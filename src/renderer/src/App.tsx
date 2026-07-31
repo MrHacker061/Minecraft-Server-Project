@@ -102,6 +102,19 @@ const dimensionLabels: Record<WorldDimension, string> = {
   end: 'The End'
 }
 
+function BrandMark({ large = false }: { large?: boolean }): React.JSX.Element {
+  return (
+    <div className={`brand-mark${large ? ' large' : ''}`} aria-hidden="true">
+      <svg viewBox="0 0 32 32" fill="none">
+        <ellipse cx="16" cy="16" rx="9.3" ry="3.8" />
+        <ellipse cx="16" cy="16" rx="9.3" ry="3.8" transform="rotate(60 16 16)" />
+        <ellipse cx="16" cy="16" rx="9.3" ry="3.8" transform="rotate(120 16 16)" />
+        <circle className="brand-mark-core" cx="16" cy="16" r="1.65" />
+      </svg>
+    </div>
+  )
+}
+
 function instanceSoftware(instance: InstanceView): ServerSoftwareSelection {
   return instance.software
 }
@@ -188,7 +201,7 @@ function MetricCard({ icon: Icon, label, value, detail, tone = 'green' }: {
 function LoadingScreen(): React.JSX.Element {
   return (
     <main className="loading-screen">
-      <div className="brand-mark large"><span>E</span></div>
+      <BrandMark large />
       <LoaderCircle className="spin" size={22} />
       <p>Preparing your control room…</p>
     </main>
@@ -317,7 +330,7 @@ function CreateServerDialog({ bootstrap, canClose, progress, creating, error, on
           <button className="icon-button dialog-close" onClick={onClose} aria-label="Close setup"><X size={18} /></button>
         )}
         <div className="setup-aside">
-          <div className="brand"><div className="brand-mark"><span>E</span></div><div><strong>EmberHost</strong><small>Server manager</small></div></div>
+          <div className="brand"><BrandMark /><div><strong>EmberHost</strong><small>Server manager</small></div></div>
           <div className="setup-copy">
             <span className="eyebrow"><Sparkles size={14} /> Quick setup</span>
             <h2 id="setup-title">Build a world that stays yours.</h2>
@@ -427,7 +440,7 @@ function CreateServerDialog({ bootstrap, canClose, progress, creating, error, on
 
           {creating && (
             <div className="creation-progress" aria-live="polite">
-              <div className="progress-orbit"><div className="brand-mark large"><span>E</span></div><span /></div>
+              <div className="progress-orbit"><BrandMark large /><span /></div>
               <span className="eyebrow">Creating your server</span>
               <h3>{progress?.message ?? 'Preparing…'}</h3>
               <div className="progress-track"><span style={{ width: `${progress?.percent ?? 2}%` }} /></div>
@@ -1492,7 +1505,7 @@ export default function App(): React.JSX.Element {
   return (
     <div className="app-shell">
       <aside className="sidebar">
-        <div className="brand"><div className="brand-mark"><span>E</span></div><div><strong>EmberHost</strong><small>Server manager</small></div></div>
+        <div className="brand"><BrandMark /><div><strong>EmberHost</strong><small>Server manager</small></div></div>
         <div className="instance-select-wrap"><span>Active server</span><select aria-label="Active server" value={selected?.id ?? ''} onChange={(event) => setSelectedId(event.target.value)} disabled={!instances.length}>{instances.length ? instances.map((instance) => <option value={instance.id} key={instance.id}>{instance.name}</option>) : <option>No server yet</option>}</select></div>
         <nav aria-label="Main navigation">
           <span>Workspace</span>
@@ -1525,7 +1538,7 @@ export default function App(): React.JSX.Element {
                : view === 'plugins' ? <PluginsView key={selected.id} instance={selected} plugins={selectedPlugins} catalog={selectedPluginCatalog} loading={pluginLoading} catalogLoading={catalogLoading} busy={pluginBusy || pluginLoading || catalogLoading} installingProjectId={catalogInstall?.instanceId === selected.id ? catalogInstall.projectId : null} onInstall={() => void installPaperPlugin()} onInstallCatalog={(projectId) => void installCatalogPaperPlugin(projectId)} onOpenCatalogSource={openPaperPluginSource} onRemove={(fileName) => void removePaperPlugin(fileName)} onRefresh={() => void refreshPaperPlugins()} onRefreshCatalog={() => void refreshPaperPluginCatalog()} onCreatePaper={openCreate} />
                : view === 'console' ? <ConsoleView key={selected.id} instance={selected} logs={selectedLogs} onSend={sendCommand} />
                 : <SettingsView instance={selected} totalMemoryMb={bootstrap.totalMemoryMb} appSettings={appSettings} saving={saving} appSettingsSaving={appSettingsSaving} deleting={deleting} onSave={saveSettings} onAppSettings={saveAppSettings} onDeleteRequest={() => setDeleteTarget(selected)} />
-        ) : <div className="empty-workspace"><div className="brand-mark large"><span>E</span></div><h2>Create your first server</h2><p>Start with recommended Paper performance or choose the official Vanilla experience.</p><button className="button primary" onClick={openCreate}><Plus size={17} /> Create a server</button></div>}
+        ) : <div className="empty-workspace"><BrandMark large /><h2>Create your first server</h2><p>Start with recommended Paper performance or choose the official Vanilla experience.</p><button className="button primary" onClick={openCreate}><Plus size={17} /> Create a server</button></div>}
       </main>
 
       {showCreate && <CreateServerDialog bootstrap={bootstrap} canClose={instances.length > 0} progress={createProgress} creating={creating} error={createError} onClose={() => setShowCreate(false)} onCreate={createInstance} />}

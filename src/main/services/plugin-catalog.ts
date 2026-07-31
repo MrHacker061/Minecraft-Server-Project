@@ -10,7 +10,7 @@ import type { AppStore } from './store'
 
 const MODRINTH_API_ORIGIN = 'https://api.modrinth.com'
 const MODRINTH_CDN_ORIGIN = 'https://cdn.modrinth.com'
-const USER_AGENT = 'MrHacker061/EmberHost/0.4.1 (github.com/MrHacker061/Minecraft-Server-Project)'
+const USER_AGENT = 'MrHacker061/EmberHost/0.4.2 (github.com/MrHacker061/Minecraft-Server-Project)'
 const MAX_METADATA_BYTES = 2 * 1024 * 1024
 const MAX_PLUGIN_BYTES = 128 * 1024 * 1024
 const METADATA_TIMEOUT_MS = 20_000
