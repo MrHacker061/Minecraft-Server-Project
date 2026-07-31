@@ -1,4 +1,5 @@
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, shell, Tray, type IpcMainInvokeEvent } from 'electron'
+import { mkdir, rename } from 'node:fs/promises'
 import { cpus, homedir, totalmem } from 'node:os'
 import { basename, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -26,6 +27,7 @@ import {
   minecraftVersionSchema,
   removeForceLoadedRegionSchema,
   removePaperPluginSchema,
+  regenerateWorldSchema,
   updateInstanceSchema,
   validationMessage
 } from './services/validation'
@@ -115,6 +117,16 @@ function runtimeDataDirectory(): string {
     return join(process.env.XDG_DATA_HOME || join(homedir(), '.local', 'share'), 'EmberHost')
   }
   return join(app.getPath('userData'), 'runtime-data')
+}
+
+async function moveItemToTrash(itemPath: string): Promise<void> {
+  const testTrashDirectory = process.env.EMBERHOST_TEST_TRASH_DIRECTORY
+  if (testTrashDirectory && (!app.isPackaged || process.env.NODE_ENV === 'test')) {
+    await mkdir(testTrashDirectory, { recursive: true })
+    await rename(itemPath, join(testTrashDirectory, basename(itemPath)))
+    return
+  }
+  await shell.trashItem(itemPath)
 }
 
 function createBrandImage(size: number): Electron.NativeImage {
@@ -298,6 +310,28 @@ function registerIpc(): void {
       console.error('Could not refresh the tray after deleting a server.', error)
     }
   })
+  handle(channels.getWorldSeed, (_event, id) => {
+    const parsedId = parseOrThrow(instanceIdSchema.safeParse(id))
+    return instanceService.getWorldSeed(parsedId)
+  })
+  handle(channels.regenerateWorld, async (_event, input) => {
+    assertCanMutate()
+    const parsed = parseOrThrow(regenerateWorldSchema.safeParse(input))
+    await worldService.beginWorldRegeneration(parsed.instanceId)
+    let result
+    try {
+      result = await instanceService.regenerateWorld(parsed)
+    } catch (error) {
+      worldService.abortWorldRegeneration(parsed.instanceId)
+      throw error
+    }
+    try {
+      worldService.completeWorldRegeneration(parsed.instanceId)
+    } catch (error) {
+      console.error('The world was regenerated, but the World tools UI could not be reset.', error)
+    }
+    return result
+  })
   handle(channels.startInstance, async (_event, id) => {
     assertCanMutate()
     const parsedId = parseOrThrow(instanceIdSchema.safeParse(id))
@@ -418,9 +452,9 @@ async function initialize(): Promise<void> {
   store = new AppStore(dataDirectory)
   await store.load()
   manager = new ServerManager(store)
-  instanceService = new InstanceService(store, manager, dataDirectory, (itemPath) => shell.trashItem(itemPath))
+  instanceService = new InstanceService(store, manager, dataDirectory, moveItemToTrash)
   worldService = new WorldService(store, manager)
-  pluginService = new PluginService(store, manager, (itemPath) => shell.trashItem(itemPath))
+  pluginService = new PluginService(store, manager, moveItemToTrash)
   pluginCatalogService = new PluginCatalogService(store, manager, pluginService)
   manager.onConsole((entry) => mainWindow?.webContents.send(channels.consoleEntry, entry))
   manager.onState((event) => {

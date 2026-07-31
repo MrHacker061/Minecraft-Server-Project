@@ -271,6 +271,28 @@ describe('world preparation validation and lifecycle', () => {
     })
   })
 
+  it('blocks regeneration while world preparation is running or paused and releases the barrier on refusal', async () => {
+    const { service, manager } = await harness()
+    await service.startWorldPreparation({ instanceId: INSTANCE_ID, radius: 256, dimensions: ['overworld'] })
+
+    await expect(service.beginWorldRegeneration(INSTANCE_ID)).rejects.toMatchObject({
+      code: 'WORLD_PREPARATION_BUSY'
+    })
+    await expect(service.getWorldPreparation(INSTANCE_ID)).resolves.toMatchObject({ status: 'running' })
+
+    const pausing = service.pauseWorldPreparation(INSTANCE_ID)
+    await vi.waitFor(() => expect(manager.commands).toContain('chunky pause'))
+    manager.emitConsole(INSTANCE_ID, '[19:10:02 INFO]: [Chunky] Task paused for world.')
+    manager.emitConsole(INSTANCE_ID, '[19:10:03 INFO]: [Chunky] Task stopped for world.')
+    await pausing
+    await service.awaitIdle()
+
+    await expect(service.beginWorldRegeneration(INSTANCE_ID)).rejects.toMatchObject({
+      code: 'WORLD_PREPARATION_BUSY'
+    })
+    await expect(service.getWorldPreparation(INSTANCE_ID)).resolves.toMatchObject({ status: 'paused' })
+  })
+
   it('uses a safe custom level-name for backups and Chunky world selection', async () => {
     const { service, manager, instance } = await harness()
     await rename(join(instance.serverDirectory, 'world'), join(instance.serverDirectory, 'custom_world'))

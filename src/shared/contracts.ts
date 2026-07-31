@@ -151,6 +151,17 @@ export interface DeleteInstanceInput {
   confirmationName: string
 }
 
+export interface WorldSeedState {
+  instanceId: string
+  seed: string
+}
+
+export interface RegenerateWorldInput {
+  instanceId: string
+  seed: string
+  confirmationName: string
+}
+
 export interface PaperPluginInfo {
   fileName: string
   name: string | null
@@ -247,6 +258,8 @@ export interface EmberHostApi {
   createInstance: (input: CreateInstanceInput) => Promise<InstanceView>
   updateInstance: (input: UpdateInstanceInput) => Promise<InstanceView>
   deleteInstance: (input: DeleteInstanceInput) => Promise<void>
+  getWorldSeed: (id: string) => Promise<WorldSeedState>
+  regenerateWorld: (input: RegenerateWorldInput) => Promise<WorldSeedState>
   startInstance: (id: string) => Promise<InstanceView>
   stopInstance: (id: string) => Promise<InstanceView>
   sendCommand: (id: string, command: string) => Promise<void>

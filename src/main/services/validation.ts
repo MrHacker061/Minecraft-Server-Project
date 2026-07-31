@@ -35,6 +35,18 @@ export const deleteInstanceSchema = z.object({
   confirmationName: serverName
 })
 
+const worldSeedSchema = z
+  .string()
+  .refine((value) => !/[\u0000-\u001f\u007f]/.test(value), 'The world seed cannot contain control characters.')
+  .transform((value) => value.trim())
+  .refine((value) => value.length <= 128, 'Use 128 characters or fewer for the world seed.')
+
+export const regenerateWorldSchema = z.object({
+  instanceId: instanceIdSchema,
+  seed: worldSeedSchema,
+  confirmationName: serverName
+})
+
 export const removePaperPluginSchema = z.object({
   instanceId: instanceIdSchema,
   fileName: z.string().min(5).max(240)

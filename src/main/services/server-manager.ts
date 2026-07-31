@@ -16,6 +16,7 @@ import { AppError } from './errors'
 import { checkJava } from './java'
 import { isMsptHeader, parseMsptValuesLine, parseTpsLine, sampleProcessHealth } from './metrics'
 import type { AppStore } from './store'
+import { assertNoInterruptedWorldRegeneration } from './world-regeneration-safety'
 
 interface ManagedProcess {
   child: ChildProcessWithoutNullStreams
@@ -161,7 +162,7 @@ export class ServerManager {
     const instance = this.requireInstance(instanceId)
     await this.markerCleanups.get(instanceId)
     if (this.isActive(instanceId)) {
-      throw new AppError('Stop the server before deleting it.', 'SERVER_MUST_BE_STOPPED')
+      throw new AppError('Stop the server before making this change.', 'SERVER_MUST_BE_STOPPED')
     }
     await this.assertNoOrphan(instance)
   }
@@ -183,6 +184,7 @@ export class ServerManager {
         throw new AppError('This server is already running or changing state.', 'SERVER_BUSY')
       }
       await this.assertNoOrphan(instance)
+      await assertNoInterruptedWorldRegeneration(instance)
 
       const java = await this.dependencies.checkJava(instance.javaPath)
       if (!java.available || java.majorVersion === null) {

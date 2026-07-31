@@ -6,9 +6,11 @@ import type {
   DeleteInstanceInput,
   InstanceView,
   PaperBuildInfo,
+  RegenerateWorldInput,
   ServerInstance,
   SetupProgress,
-  UpdateInstanceInput
+  UpdateInstanceInput,
+  WorldSeedState
 } from '../../shared/contracts'
 import { PERFORMANCE_PROFILES } from '../../shared/performance'
 import { downloadChunky, resolveChunkyForPaper, type ResolvedChunkyVersion } from './chunky'
@@ -16,9 +18,16 @@ import { AppError } from './errors'
 import { checkJava } from './java'
 import { downloadServerJar, resolveRelease } from './minecraft'
 import { downloadPaperJar, resolvePaperBuild } from './paper'
-import { createServerProperties, mergeServerProperties } from './properties'
+import {
+  createServerProperties,
+  getServerPropertyValue,
+  mergeServerProperties,
+  parseLevelName,
+  setServerPropertyValue
+} from './properties'
 import type { ServerManager } from './server-manager'
 import type { AppStore } from './store'
+import { assertNoInterruptedWorldRegeneration } from './world-regeneration-safety'
 
 type ProgressListener = (progress: SetupProgress) => void
 type TrashItem = (path: string) => Promise<void>
@@ -189,6 +198,111 @@ export class InstanceService {
     return this.serializeMutation(() => this.manager.runExclusive(input.id, () => this.deleteUnlocked(input)))
   }
 
+  async getWorldSeed(instanceId: string): Promise<WorldSeedState> {
+    return this.serializeMutation(() => this.manager.runExclusive(instanceId, async () => {
+      const current = this.store.getInstance(instanceId)
+      if (!current) throw new AppError('That server no longer exists.', 'INSTANCE_NOT_FOUND')
+      const managedDirectory = await this.assertManagedInstanceDirectory(current)
+      const properties = await this.readManagedProperties(join(managedDirectory, 'server.properties'))
+      return {
+        instanceId,
+        seed: (getServerPropertyValue(properties.contents, 'level-seed') ?? '').trim()
+      }
+    }))
+  }
+
+  async regenerateWorld(input: RegenerateWorldInput): Promise<WorldSeedState> {
+    return this.serializeMutation(() => this.manager.runExclusive(
+      input.instanceId,
+      () => this.regenerateWorldUnlocked(input)
+    ))
+  }
+
+  private async regenerateWorldUnlocked(input: RegenerateWorldInput): Promise<WorldSeedState> {
+    const current = this.store.getInstance(input.instanceId)
+    if (!current) throw new AppError('That server no longer exists.', 'INSTANCE_NOT_FOUND')
+    if (input.confirmationName !== current.name) {
+      throw new AppError('Enter the server name exactly to confirm world regeneration.', 'REGENERATE_CONFIRMATION_MISMATCH')
+    }
+
+    await this.manager.assertStoppedAndUnowned(input.instanceId)
+    const managedDirectory = await this.assertManagedInstanceDirectory(current)
+    await assertNoInterruptedWorldRegeneration(current)
+    const propertiesPath = join(managedDirectory, 'server.properties')
+    const properties = await this.readManagedProperties(propertiesPath)
+    const levelName = parseLevelName(properties.contents)
+    const candidates = [levelName, `${levelName}_nether`, `${levelName}_the_end`]
+    const sources: Array<{ source: string; name: string }> = []
+
+    for (const name of candidates) {
+      const source = join(managedDirectory, name)
+      if (await this.assertSafeWorldDirectoryIfPresent(source)) sources.push({ source, name })
+    }
+    const performancePath = join(managedDirectory, 'emberhost-performance.json')
+    if (await this.assertSafeFileIfPresent(performancePath, 'World-performance metadata')) {
+      sources.push({ source: performancePath, name: 'emberhost-performance.json' })
+    }
+
+    const quarantineDirectory = join(this.serversDirectory, `.${current.id}.world-regeneration-${randomUUID()}`)
+    const moved: Array<{ source: string; destination: string }> = []
+    let propertiesUpdated = false
+    let quarantineCreated = false
+    try {
+      if (sources.length) {
+        await mkdir(quarantineDirectory)
+        quarantineCreated = true
+        for (const item of sources) {
+          const destination = join(quarantineDirectory, item.name)
+          await rename(item.source, destination)
+          moved.push({ source: item.source, destination })
+        }
+      }
+
+      const baseProperties = properties.existed ? properties.contents : createServerProperties(current)
+      await this.atomicWrite(propertiesPath, setServerPropertyValue(baseProperties, 'level-seed', input.seed))
+      propertiesUpdated = true
+      if (quarantineCreated) await this.trashItem(quarantineDirectory)
+    } catch (error) {
+      const rollbackFailures: string[] = []
+      if (propertiesUpdated) {
+        try {
+          if (properties.existed) await this.atomicWrite(propertiesPath, properties.contents)
+          else await rm(propertiesPath, { force: true })
+        } catch (rollbackError) {
+          rollbackFailures.push(`server.properties: ${this.errorMessage(rollbackError)}`)
+        }
+      }
+      for (const item of moved.reverse()) {
+        try {
+          await rename(item.destination, item.source)
+        } catch (rollbackError) {
+          rollbackFailures.push(`${item.source}: ${this.errorMessage(rollbackError)}`)
+        }
+      }
+      if (quarantineCreated && rollbackFailures.length === 0) {
+        try {
+          await rm(quarantineDirectory, { recursive: true, force: true })
+        } catch (rollbackError) {
+          rollbackFailures.push(`quarantine: ${this.errorMessage(rollbackError)}`)
+        }
+      }
+      if (rollbackFailures.length) {
+        throw new AppError(
+          `World regeneration failed and EmberHost could not fully restore the previous world. Recovery data may remain at ${quarantineDirectory}.`,
+          'WORLD_REGENERATION_ROLLBACK_FAILED',
+          rollbackFailures.join('; ')
+        )
+      }
+      throw new AppError(
+        'EmberHost could not recycle the previous world, so the world and seed were restored.',
+        'WORLD_REGENERATION_FAILED',
+        this.errorMessage(error)
+      )
+    }
+
+    return { instanceId: current.id, seed: input.seed }
+  }
+
   private async deleteUnlocked(input: DeleteInstanceInput): Promise<void> {
     const current = this.store.getInstance(input.id)
     if (!current) throw new AppError('That server no longer exists.', 'INSTANCE_NOT_FOUND')
@@ -198,6 +312,7 @@ export class InstanceService {
 
     await this.manager.assertStoppedAndUnowned(input.id)
     const managedDirectory = await this.assertManagedInstanceDirectory(current)
+    await assertNoInterruptedWorldRegeneration(current)
     const quarantinedDirectory = join(this.serversDirectory, `.${current.id}.deleting-${randomUUID()}`)
     await rename(managedDirectory, quarantinedDirectory)
 
@@ -299,6 +414,71 @@ export class InstanceService {
       throw error
     }
     return expectedDirectory
+  }
+
+  private async readManagedProperties(propertiesPath: string): Promise<{ contents: string; existed: boolean }> {
+    try {
+      const stats = await lstat(propertiesPath)
+      if (!stats.isFile() || stats.isSymbolicLink()) {
+        throw new AppError('server.properties is not a normal local file.', 'UNSAFE_SERVER_PROPERTIES')
+      }
+      return { contents: await readFile(propertiesPath, 'utf8'), existed: true }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { contents: '', existed: false }
+      throw error
+    }
+  }
+
+  private async assertSafeWorldDirectoryIfPresent(directory: string): Promise<boolean> {
+    let stats
+    try {
+      stats = await lstat(directory)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false
+      throw error
+    }
+    if (!stats.isDirectory() || stats.isSymbolicLink()) {
+      throw new AppError(
+        `EmberHost refused to remove ${directory} because it is not a normal local world directory.`,
+        'UNSAFE_WORLD_DIRECTORY'
+      )
+    }
+    const levelData = join(directory, 'level.dat')
+    try {
+      const levelDataStats = await lstat(levelData)
+      if (!levelDataStats.isFile() || levelDataStats.isSymbolicLink()) {
+        throw new AppError(
+          `EmberHost refused to remove ${directory} because its level.dat is not a normal local file.`,
+          'UNSAFE_WORLD_DIRECTORY'
+        )
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        throw new AppError(
+          `EmberHost refused to remove ${directory} because it does not contain level.dat.`,
+          'UNSAFE_WORLD_DIRECTORY'
+        )
+      }
+      throw error
+    }
+    return true
+  }
+
+  private async assertSafeFileIfPresent(filePath: string, description: string): Promise<boolean> {
+    try {
+      const stats = await lstat(filePath)
+      if (!stats.isFile() || stats.isSymbolicLink()) {
+        throw new AppError(`${description} is not a normal local file.`, 'UNSAFE_WORLD_METADATA')
+      }
+      return true
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false
+      throw error
+    }
+  }
+
+  private errorMessage(error: unknown): string {
+    return error instanceof Error ? error.message : String(error)
   }
 
   private async updateUnlocked(input: UpdateInstanceInput): Promise<InstanceView> {

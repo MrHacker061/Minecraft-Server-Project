@@ -1,4 +1,4 @@
-import { access, mkdir, readdir, rm, writeFile } from 'node:fs/promises'
+import { access, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { networkInterfaces } from 'node:os'
 import { resolve } from 'node:path'
 import { _electron as electron } from 'playwright-core'
@@ -10,11 +10,35 @@ const serverId = '8f4b1cf8-7f1f-45d2-889f-2f0fc3c5f23c'
 const paperServerId = '5030c6a4-1aa3-4adc-9a7c-4e1bed90fb3c'
 const serverDirectory = resolve(testProfile, 'runtime-data', 'servers', serverId)
 const paperServerDirectory = resolve(testProfile, 'runtime-data', 'servers', paperServerId)
+
+async function waitForInputValue(input, expected, timeoutMs = 10_000) {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    if (await input.inputValue() === expected) return
+    await new Promise((resolveWait) => setTimeout(resolveWait, 50))
+  }
+  throw new Error(`Input did not reach the expected value: ${expected}`)
+}
+
 await rm(testProfile, { recursive: true, force: true })
 await mkdir(serverDirectory, { recursive: true })
 await mkdir(paperServerDirectory, { recursive: true })
 await mkdir(resolve(paperServerDirectory, 'plugins'), { recursive: true })
 await mkdir(artifacts, { recursive: true })
+const vanillaLevelName = 'cedar_world'
+const vanillaWorldDirectories = [
+  resolve(serverDirectory, vanillaLevelName),
+  resolve(serverDirectory, `${vanillaLevelName}_nether`),
+  resolve(serverDirectory, `${vanillaLevelName}_the_end`)
+]
+await Promise.all(vanillaWorldDirectories.map((directory) => mkdir(directory, { recursive: true })))
+await Promise.all(vanillaWorldDirectories.map((directory, index) => writeFile(resolve(directory, 'level.dat'), `world-${index}`, 'utf8')))
+await writeFile(resolve(serverDirectory, 'server.jar'), 'seeded vanilla server', 'utf8')
+await writeFile(resolve(paperServerDirectory, 'paper.jar'), 'seeded paper server', 'utf8')
+await writeFile(resolve(serverDirectory, 'emberhost-instance.json'), `${JSON.stringify({ id: serverId })}\n`, 'utf8')
+await writeFile(resolve(paperServerDirectory, 'emberhost-instance.json'), `${JSON.stringify({ id: paperServerId })}\n`, 'utf8')
+await writeFile(resolve(serverDirectory, 'server.properties'), `# smoke properties\nlevel-name=${vanillaLevelName}\nlevel-seed=old-seed\nunknown-smoke-setting=preserve-me\n`, 'utf8')
+await writeFile(resolve(paperServerDirectory, 'server.properties'), 'level-name=world\nlevel-seed=paper-seed\n', 'utf8')
 await writeFile(resolve(paperServerDirectory, 'plugins', 'Chunky.jar'), 'seeded built-in plugin', 'utf8')
 await writeFile(resolve(paperServerDirectory, 'plugins', 'ExamplePlugin.jar'), 'seeded external plugin', 'utf8')
 
@@ -81,7 +105,8 @@ const application = await electron.launch({
   env: {
     ...process.env,
     ...(packagedExecutable ? { NODE_ENV: 'test' } : {}),
-    EMBERHOST_USER_DATA: testProfile
+    EMBERHOST_USER_DATA: testProfile,
+    EMBERHOST_TEST_TRASH_DIRECTORY: resolve(testProfile, 'test-trash')
   }
 })
 
@@ -121,7 +146,70 @@ try {
   if (browserMessages.length) throw new Error(`Dashboard renderer errors: ${JSON.stringify(browserMessages)}`)
   await window.screenshot({ path: resolve(artifacts, 'dashboard.png') })
   await window.locator('nav').getByRole('button', { name: 'World tools', exact: true }).click()
-  await window.getByText('World tools need a Paper server.').waitFor()
+  await window.getByText('World generation', { exact: true }).waitFor()
+  await window.getByText('Advanced terrain tools need a Paper server.').waitFor()
+  const seedInput = window.getByLabel('World seed')
+  await seedInput.waitFor()
+  await waitForInputValue(seedInput, 'old-seed')
+  await seedInput.fill('new-seed-8675309')
+  const regenerateButton = window.getByRole('button', { name: 'Regenerate world', exact: true })
+  await regenerateButton.click()
+  let regenerationDialog = window.getByRole('alertdialog', { name: 'Regenerate Cedar Valley?' })
+  await regenerationDialog.getByText('The previous world is wiped before the new one is created.').waitFor()
+  await regenerationDialog.getByText('This removes the active Overworld, Nether, and End, including every build, explored chunk, inventory, advancement, and player-data file in those worlds.').waitFor()
+  await regenerationDialog.getByText('The old active world folders are moved to your recycle bin. Server settings, plugins, and EmberHost backups remain. Minecraft creates the replacement world the next time you start the server.').waitFor()
+  await regenerationDialog.getByText('New world seed').waitFor()
+  const regenerationConfirmation = regenerationDialog.getByLabel('Enter Cedar Valley to confirm world regeneration')
+  await regenerationConfirmation.fill('wrong name')
+  if (await regenerationDialog.getByRole('button', { name: 'Wipe and regenerate world' }).isEnabled()) {
+    throw new Error('World regeneration accepted the wrong server name.')
+  }
+  await regenerationConfirmation.fill('Cedar Valley')
+  const confirmRegenerationButton = regenerationDialog.getByRole('button', { name: 'Wipe and regenerate world' })
+  if (!(await confirmRegenerationButton.isEnabled())) {
+    throw new Error('World regeneration did not accept the exact server name.')
+  }
+  await regenerationConfirmation.press('Shift+Tab')
+  if (!(await confirmRegenerationButton.evaluate((element) => document.activeElement === element))) {
+    throw new Error('World regeneration dialog did not contain backward keyboard focus.')
+  }
+  await confirmRegenerationButton.press('Tab')
+  if (!(await regenerationConfirmation.evaluate((element) => document.activeElement === element))) {
+    throw new Error('World regeneration dialog did not contain forward keyboard focus.')
+  }
+  await window.screenshot({ path: resolve(artifacts, 'regenerate-confirm.png') })
+  await regenerationDialog.getByRole('button', { name: 'Cancel', exact: true }).click()
+  await window.waitForFunction(() => document.activeElement?.textContent?.trim() === 'Regenerate world')
+  for (const directory of vanillaWorldDirectories) await access(resolve(directory, 'level.dat'))
+  if (!(await readFile(resolve(serverDirectory, 'server.properties'), 'utf8')).includes('level-seed=old-seed')) {
+    throw new Error('Cancelling regeneration changed server.properties.')
+  }
+  await regenerateButton.click()
+  regenerationDialog = window.getByRole('alertdialog', { name: 'Regenerate Cedar Valley?' })
+  await regenerationDialog.getByLabel('Enter Cedar Valley to confirm world regeneration').fill('Cedar Valley')
+  await regenerationDialog.getByRole('button', { name: 'Wipe and regenerate world' }).click()
+  await window.getByText('World wiped. Start the server to generate seed new-seed-8675309.', { exact: true }).waitFor({ timeout: 30_000 })
+  await window.waitForFunction(() => document.activeElement?.textContent?.trim() === 'Regenerate world')
+  for (const directory of vanillaWorldDirectories) {
+    try {
+      await access(directory)
+      throw new Error(`Regeneration left the old world directory in place: ${directory}`)
+    } catch (error) {
+      if (error instanceof Error && error.message.startsWith('Regeneration left')) throw error
+      if (error?.code !== 'ENOENT') throw error
+    }
+  }
+  const trashedRegenerations = await readdir(resolve(testProfile, 'test-trash'))
+  if (!trashedRegenerations.some((name) => name.includes(`${serverId}.world-regeneration-`))) {
+    throw new Error('Regeneration did not use the isolated smoke-test trash directory.')
+  }
+  const regeneratedProperties = await readFile(resolve(serverDirectory, 'server.properties'), 'utf8')
+  if (!regeneratedProperties.includes('level-seed=new-seed-8675309') || !regeneratedProperties.includes('unknown-smoke-setting=preserve-me')) {
+    throw new Error('Regeneration did not update the seed while preserving unknown server properties.')
+  }
+  if (await readFile(resolve(serverDirectory, 'server.jar'), 'utf8') !== 'seeded vanilla server') {
+    throw new Error('Regeneration changed the server launch artifact.')
+  }
   await window.screenshot({ path: resolve(artifacts, 'world-tools.png') })
   await window.getByRole('button', { name: 'Plugins', exact: false }).click()
   await window.getByText('Plugins need a Paper server.').waitFor()
@@ -151,6 +239,9 @@ try {
   await window.getByText('ExamplePlugin', { exact: true }).waitFor()
   await window.screenshot({ path: resolve(artifacts, 'paper-plugins.png') })
   await window.locator('nav').getByRole('button', { name: 'World tools', exact: false }).click()
+  await window.getByText('World generation', { exact: true }).waitFor()
+  await window.getByLabel('World seed').waitFor()
+  await waitForInputValue(window.getByLabel('World seed'), 'paper-seed')
   await window.getByText('World Preparation', { exact: true }).waitFor()
   await window.getByText('Force-loaded Regions', { exact: true }).waitFor()
   await window.screenshot({ path: resolve(artifacts, 'paper-world-tools.png') })
@@ -164,20 +255,22 @@ try {
   await window.getByRole('button', { name: 'Settings', exact: true }).click()
   await window.getByText('Server identity').waitFor()
   await window.getByRole('button', { name: 'Delete server', exact: true }).click()
-  await window.getByText('Delete Paper Ridge?').waitFor()
-  const deleteInput = window.locator('.confirm-dialog input')
+  const deleteDialog = window.getByRole('dialog', { name: 'Delete Paper Ridge?' })
+  await deleteDialog.waitFor()
+  const deleteInput = deleteDialog.getByLabel('Enter Paper Ridge to confirm')
   await deleteInput.fill('wrong name')
-  if (await window.getByRole('button', { name: 'Move to recycle bin' }).isEnabled()) {
+  if (await deleteDialog.getByRole('button', { name: 'Move to recycle bin' }).isEnabled()) {
     throw new Error('Deletion confirmation accepted the wrong server name.')
   }
   await deleteInput.fill('Paper Ridge')
-  if (!(await window.getByRole('button', { name: 'Move to recycle bin' }).isEnabled())) {
+  if (!(await deleteDialog.getByRole('button', { name: 'Move to recycle bin' }).isEnabled())) {
     throw new Error('Deletion confirmation did not accept the exact server name.')
   }
   await window.screenshot({ path: resolve(artifacts, 'delete-confirm.png') })
-  await window.getByRole('button', { name: 'Cancel', exact: true }).click()
+  await deleteDialog.getByRole('button', { name: 'Cancel', exact: true }).click()
   await access(resolve(testProfile, 'runtime-data', 'emberhost.json'))
-  process.stdout.write(`${JSON.stringify({ dashboard: true, browserMessages, screenshots: ['artifacts/dashboard.png', 'artifacts/world-tools.png', 'artifacts/plugins-vanilla.png', 'artifacts/paper-dashboard.png', 'artifacts/paper-world-tools.png', 'artifacts/paper-plugins.png', 'artifacts/delete-confirm.png'] })}\n`)
+  if (browserMessages.length) throw new Error(`Dashboard renderer errors after interactions: ${JSON.stringify(browserMessages)}`)
+  process.stdout.write(`${JSON.stringify({ dashboard: true, browserMessages, screenshots: ['artifacts/dashboard.png', 'artifacts/world-tools.png', 'artifacts/regenerate-confirm.png', 'artifacts/plugins-vanilla.png', 'artifacts/paper-dashboard.png', 'artifacts/paper-world-tools.png', 'artifacts/paper-plugins.png', 'artifacts/delete-confirm.png'] })}\n`)
 } finally {
   await application.evaluate(({ app }) => {
     setTimeout(() => app.exit(0), 20)

@@ -26,6 +26,7 @@ EmberHost is a desktop control panel for turning a personal computer into a self
 - Sends a graceful stop command before escalating after a timeout.
 - Streams output into a live console and a persistent, size-capped instance log.
 - Persists multiple server configurations with atomic, schema-versioned JSON.
+- Changes the configured world seed and safely regenerates the active Overworld, Nether, and End for Vanilla or Paper.
 - Browses a curated catalog of common Paper plugins and resolves releases for the server's exact Minecraft version.
 - Adds, inventories, and removes local Paper plugin JARs while the server is stopped.
 - Moves deleted server folders and removable plugins to the operating system recycle bin instead of permanently erasing them.
@@ -97,11 +98,13 @@ pnpm dist       # platform installer
 4. Read and explicitly accept the [Minecraft EULA](https://www.minecraft.net/en-us/eula).
 5. Select **Download & create**, then start the server.
 6. Open **Plugins** on a stopped Paper server to browse the curated catalog or add a trusted local plugin JAR.
-7. Open **World Tools** on a Paper server to prepare terrain or add small force-loaded regions.
+7. Open **World Tools** to set a seed or regenerate the active world. Paper servers can also prepare terrain or add small force-loaded regions.
 
 Mojang's manifest includes a few very early client releases for which it no longer publishes a server artifact. EmberHost shows those releases but refuses creation with a clear message rather than downloading an unofficial or unverifiable JAR.
 
 To delete a server, stop it, open **Settings**, choose **Delete server**, and enter the server name exactly. EmberHost validates that the folder is one of its managed UUID directories, checks for live or orphaned Java processes, and then moves the complete folder to the recycle bin. Shared download caches are preserved.
+
+To change an existing world's seed, stop the server, open **World Tools**, enter the replacement seed, and choose **Regenerate world**. EmberHost requires the exact server name and clearly confirms that the active Overworld, Nether, End, builds, inventories, and player data are removed first. The old active world folders are moved to the recycle bin; server settings, plugins, and EmberHost backups remain.
 
 Players on the same machine can use localhost:25565. Other devices on the LAN should use the host computer's private IP. Public hosting commonly requires a firewall rule, router port forwarding, and a public IP that is not behind CGNAT. EmberHost does not silently make those security-sensitive changes.
 
@@ -154,7 +157,7 @@ Electron main process
     └─ atomic store ────── app data and per-instance metadata
 ~~~
 
-Safeguards include contextIsolation, disabled Node integration, renderer sandboxing, denied navigation and popups, a restrictive CSP, IPC sender checks, Zod validation, UUID server directories, shell-free process spawning, atomic state writes, checksum verification, strict download hosts, redirect rejection, bounded streams, conservative orphan-process detection, archive validation, and recoverable deletion.
+Safeguards include contextIsolation, disabled Node integration, renderer sandboxing, denied navigation and popups, a restrictive CSP, IPC sender checks, Zod validation, UUID server directories, shell-free process spawning, atomic state writes, checksum verification, strict download hosts, redirect rejection, bounded streams, conservative orphan-process detection, archive validation, recoverable deletion, and transactional world regeneration with rollback and interrupted-operation guards.
 
 ## Upstream software and licensing
 

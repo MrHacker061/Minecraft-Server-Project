@@ -14,6 +14,7 @@ import type {
 } from '../../shared/world-contracts'
 import { parseChunkyConsoleLine } from './chunky'
 import { AppError } from './errors'
+import { parseLevelName } from './properties'
 import type { ServerManager } from './server-manager'
 import type { AppStore } from './store'
 
@@ -122,28 +123,6 @@ function dimensionId(dimension: WorldDimension): string {
   if (dimension === 'nether') return 'minecraft:the_nether'
   if (dimension === 'end') return 'minecraft:the_end'
   return 'minecraft:overworld'
-}
-
-function parseLevelName(properties: string): string {
-  let levelName = 'world'
-  for (const line of properties.split(/\r?\n/)) {
-    const trimmed = line.trim()
-    if (!trimmed || trimmed.startsWith('#')) continue
-    const separator = line.indexOf('=')
-    if (separator < 0 || line.slice(0, separator).trim() !== 'level-name') continue
-    levelName = line.slice(separator + 1).trim()
-  }
-  if (
-    !levelName ||
-    levelName === '.' ||
-    levelName === '..' ||
-    levelName.length > 128 ||
-    /[<>:"/\\|?*\u0000-\u001f]/.test(levelName) ||
-    /[. ]$/.test(levelName)
-  ) {
-    throw new AppError('The level-name in server.properties is not a safe world-folder name.', 'INVALID_LEVEL_NAME')
-  }
-  return levelName
 }
 
 function consoleMessage(line: string): string {
@@ -261,6 +240,7 @@ export class WorldService {
   private readonly forceListeners = new Set<ForceRegionsListener>()
   private readonly queues = new Map<string, Promise<unknown>>()
   private readonly deletingInstances = new Set<string>()
+  private readonly regeneratingInstances = new Set<string>()
   private readonly pauseRequested = new Set<string>()
   private readonly cancelRequested = new Set<string>()
   private readonly backupsInProgress = new Set<string>()
@@ -291,6 +271,9 @@ export class WorldService {
 
   async beginInstanceDeletion(instanceId: string): Promise<void> {
     const id = instanceIdSchema.parse(instanceId)
+    if (this.regeneratingInstances.has(id)) {
+      throw new AppError('That server world is being regenerated.', 'WORLD_REGENERATING')
+    }
     if (this.deletingInstances.has(id)) {
       throw new AppError('That server is already being deleted.', 'INSTANCE_DELETING')
     }
@@ -321,6 +304,62 @@ export class WorldService {
         waiter.resolve(false)
       }
       this.consoleWaiters.delete(instanceId)
+    }
+  }
+
+  async beginWorldRegeneration(instanceId: string): Promise<void> {
+    const id = instanceIdSchema.parse(instanceId)
+    if (this.deletingInstances.has(id)) {
+      throw new AppError('That server is being deleted.', 'INSTANCE_DELETING')
+    }
+    if (this.regeneratingInstances.has(id)) {
+      throw new AppError('That server world is already being regenerated.', 'WORLD_REGENERATING')
+    }
+    const instance = this.store.getInstance(id)
+    if (!instance) throw new AppError('That server no longer exists.', 'INSTANCE_NOT_FOUND')
+
+    this.regeneratingInstances.add(id)
+    try {
+      await (this.queues.get(id) ?? Promise.resolve()).catch(() => undefined)
+      if (instance.software.kind === 'paper') {
+        const state = await this.load(id)
+        if (state.preparation.status === 'running' || state.preparation.status === 'paused') {
+          throw new AppError(
+            'Cancel the active or paused world-preparation task before regenerating this world.',
+            'WORLD_PREPARATION_BUSY'
+          )
+        }
+      }
+    } catch (error) {
+      this.regeneratingInstances.delete(id)
+      throw error
+    }
+  }
+
+  abortWorldRegeneration(instanceId: string): void {
+    this.regeneratingInstances.delete(instanceId)
+  }
+
+  completeWorldRegeneration(instanceId: string): void {
+    this.regeneratingInstances.delete(instanceId)
+    this.states.delete(instanceId)
+    this.levelNames.delete(instanceId)
+    this.pauseRequested.delete(instanceId)
+    this.cancelRequested.delete(instanceId)
+    this.backupsInProgress.delete(instanceId)
+    this.taintedBackups.delete(instanceId)
+    const waiters = this.consoleWaiters.get(instanceId)
+    if (waiters) {
+      for (const waiter of waiters) {
+        clearTimeout(waiter.timeout)
+        waiter.resolve(false)
+      }
+      this.consoleWaiters.delete(instanceId)
+    }
+    const instance = this.store.getInstance(instanceId)
+    if (instance?.software.kind === 'paper') {
+      this.emitPreparation(emptyPreparation(instanceId))
+      this.emitForceRegions(this.forceState(instanceId, []))
     }
   }
 
@@ -1098,6 +1137,9 @@ export class WorldService {
     const next = previous.catch(() => undefined).then(() => {
       if (this.deletingInstances.has(instanceId)) {
         throw new AppError('That server is being deleted.', 'INSTANCE_DELETING')
+      }
+      if (this.regeneratingInstances.has(instanceId)) {
+        throw new AppError('That server world is being regenerated.', 'WORLD_REGENERATING')
       }
       return operation()
     })

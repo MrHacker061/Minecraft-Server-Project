@@ -10,6 +10,8 @@ export const channels = {
   createInstance: 'instance:create',
   updateInstance: 'instance:update',
   deleteInstance: 'instance:delete',
+  getWorldSeed: 'world:get-seed',
+  regenerateWorld: 'world:regenerate',
   startInstance: 'instance:start',
   stopInstance: 'instance:stop',
   command: 'instance:command',

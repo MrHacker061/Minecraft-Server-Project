@@ -71,6 +71,7 @@ import { PERFORMANCE_PROFILES, matchingPerformancePreset, profileValues } from '
 
 type ViewName = 'overview' | 'world' | 'plugins' | 'console' | 'settings'
 type Toast = { id: number; kind: 'success' | 'error' | 'info'; message: string }
+type RegenerationTarget = { instance: InstanceView; seed: string }
 
 type PaperCreateInput = CreateInstanceInput & {
   software: ServerSoftwareSelection
@@ -555,7 +556,7 @@ function Overview({ instance, address, addressHost, lanAddresses, localOnly, log
             <span className={active || stopping ? 'quick-stop' : 'quick-start'}>{busy || stopping ? <LoaderCircle className="spin" size={18} /> : active ? <CircleStop size={18} /> : <Play size={18} />}</span>
             <span><strong>{stopping ? 'Stopping server' : active ? 'Stop server' : 'Start server'}</strong><small>{stopping ? 'Saving the world safely' : active ? 'Saves the world first' : 'Launch this Minecraft world'}</small></span><ChevronRight size={16} />
           </button>
-          <button className="quick-action" onClick={onWorld}><span><Map size={18} /></span><span><strong>World tools</strong><small>{paper ? 'Prepare terrain and manage loaded regions' : 'See Paper-only world features'}</small></span><ChevronRight size={16} /></button>
+          <button className="quick-action" onClick={onWorld}><span><Map size={18} /></span><span><strong>World tools</strong><small>{paper ? 'Set a seed, prepare terrain, and manage loaded regions' : 'Set a seed or regenerate this world'}</small></span><ChevronRight size={16} /></button>
           <button className="quick-action" onClick={onConsole}><span><SquareTerminal size={18} /></span><span><strong>Open console</strong><small>View logs and run commands</small></span><ChevronRight size={16} /></button>
           <button className="quick-action" onClick={onOpenFolder}><span><FolderOpen size={18} /></span><span><strong>Server files</strong><small>Open this instance folder</small></span><ChevronRight size={16} /></button>
         </article>
@@ -596,6 +597,13 @@ function WorldToolsView({
   preparation,
   forceLoads,
   busy,
+  configuredSeed,
+  seedLoading,
+  seedReady,
+  seedError,
+  regenerating,
+  onReloadSeed,
+  onRegenerateRequest,
   onStartPreparation,
   onPausePreparation,
   onResumePreparation,
@@ -608,6 +616,13 @@ function WorldToolsView({
   preparation: WorldPreparationState
   forceLoads: ForceLoadedRegionsState
   busy: boolean
+  configuredSeed: string
+  seedLoading: boolean
+  seedReady: boolean
+  seedError: string | null
+  regenerating: boolean
+  onReloadSeed: () => void
+  onRegenerateRequest: (seed: string) => void
   onStartPreparation: (input: { radius: number; dimensions: WorldDimension[] }) => void
   onPausePreparation: () => void
   onResumePreparation: () => void
@@ -618,7 +633,9 @@ function WorldToolsView({
 }): React.JSX.Element {
   const paper = instanceSoftware(instance).kind === 'paper'
   const online = instance.runtime.status === 'online'
+  const active = instance.runtime.status === 'online' || instance.runtime.status === 'starting' || instance.runtime.status === 'stopping'
   const playersConnected = instance.runtime.playerCount > 0
+  const [seed, setSeed] = useState(configuredSeed)
   const [radius, setRadius] = useState(5000)
   const [dimensions, setDimensions] = useState<WorldDimension[]>(['overworld'])
   const [forceDimension, setForceDimension] = useState<WorldDimension>('overworld')
@@ -627,6 +644,8 @@ function WorldToolsView({
   const [forceRadius, setForceRadius] = useState(1)
 
   const preparing = preparation.status === 'running' || preparation.status === 'paused'
+  const regenerationDisabled = active || preparing || busy || regenerating || seedLoading || !seedReady
+  const seedHelpId = `world-seed-help-${instance.id}`
   const estimatedSide = Math.ceil(radius / 16) * 2 + 1
   const estimatedChunks = estimatedSide * estimatedSide * dimensions.length
   const projectedForceChunks = (forceRadius * 2 + 1) ** 2
@@ -637,12 +656,27 @@ function WorldToolsView({
     setDimensions((current) => current.includes(dimension) ? current.filter((value) => value !== dimension) : [...current, dimension])
   }
 
+  useEffect(() => setSeed(configuredSeed), [instance.id, configuredSeed])
+
   return (
     <div className="page-content world-content">
+      <section className="world-panel seed-panel" aria-labelledby="world-generation-title">
+        <div className="world-panel-heading">
+          <div><span className="panel-icon"><Globe2 size={18} /></span><div><h2 id="world-generation-title">World generation</h2><p>Choose the seed Minecraft uses when it creates the replacement world.</p></div></div>
+          <span className="tool-status">Offline required</span>
+        </div>
+        <div className="seed-layout">
+          <label className="field"><span>World seed</span><input type="text" value={seed} maxLength={128} disabled={regenerationDisabled} aria-describedby={seedHelpId} placeholder={seedLoading ? 'Loading seed...' : seedError ? 'Seed unavailable' : 'Leave blank for a random seed'} spellCheck={false} onChange={(event) => setSeed(event.target.value)} /><small id={seedHelpId}>Changing this value does not alter existing terrain. Regenerate the world to apply it.</small></label>
+          <div className="seed-action"><button type="button" className="button danger" disabled={regenerationDisabled} onClick={() => onRegenerateRequest(seed)}>{regenerating ? <LoaderCircle className="spin" size={16} /> : <RotateCcw size={16} />} Regenerate world</button>{seedLoading ? <small>Reading server.properties...</small> : active ? <small>Stop the server before regenerating.</small> : preparing ? <small>Cancel the active world preparation first.</small> : <small>The new world is created on the next start.</small>}</div>
+        </div>
+        {seedError && <div className="tool-callout danger seed-load-error" role="alert"><AlertTriangle size={17} /><div><strong>The configured seed could not be loaded.</strong><span>{seedError}</span></div><button type="button" className="button secondary compact" disabled={seedLoading} onClick={onReloadSeed}><RotateCcw size={14} /> Try again</button></div>}
+        <div className="tool-callout danger"><AlertTriangle size={17} /><div><strong>Regeneration wipes the active world first.</strong><span>The current Overworld, Nether, and End—including builds, inventories, player data, and explored chunks—will be removed from this server.</span></div></div>
+      </section>
+
       {!paper && (
         <section className="paper-gate" role="note">
           <div className="paper-gate-icon"><Rocket size={25} /></div>
-          <div><span className="eyebrow">Paper feature set</span><h2>World tools need a Paper server.</h2><p>This Vanilla world stays fully supported for normal hosting. Create a Paper server to pre-generate terrain, monitor tick health, and safely bound force-loaded regions.</p></div>
+          <div><span className="eyebrow">Paper feature set</span><h2>Advanced terrain tools need a Paper server.</h2><p>Seed changes and world regeneration work with Vanilla. Create a Paper server to pre-generate terrain, monitor tick health, and safely bound force-loaded regions.</p></div>
           <button className="button primary" onClick={onCreatePaper}><Plus size={16} /> New Paper server</button>
         </section>
       )}
@@ -1042,6 +1076,67 @@ function DeleteServerDialog({ instance, deleting, onCancel, onConfirm }: {
   )
 }
 
+function RegenerateWorldDialog({ instance, seed, regenerating, blockedReason, error, returnFocus, onCancel, onConfirm }: {
+  instance: InstanceView
+  seed: string
+  regenerating: boolean
+  blockedReason: string | null
+  error: string | null
+  returnFocus: HTMLElement | null
+  onCancel: () => void
+  onConfirm: (confirmationName: string) => void
+}): React.JSX.Element {
+  const [confirmationName, setConfirmationName] = useState('')
+  const dialogRef = useRef<HTMLFormElement>(null)
+  const matches = confirmationName === instance.name
+  const displayedSeed = seed.trim() || 'Random seed'
+
+  useEffect(() => {
+    return () => {
+      window.setTimeout(() => {
+        if (returnFocus?.isConnected && !returnFocus.matches(':disabled')) returnFocus.focus()
+      }, 0)
+    }
+  }, [returnFocus])
+
+  const handleKeyDown = (event: React.KeyboardEvent<HTMLFormElement>): void => {
+    if (event.key === 'Escape' && !regenerating) {
+      event.preventDefault()
+      onCancel()
+      return
+    }
+    if (event.key !== 'Tab') return
+    const focusable = [...(dialogRef.current?.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled), [href], [tabindex]:not([tabindex="-1"])') ?? [])]
+    if (!focusable.length) return
+    const first = focusable[0]!
+    const last = focusable[focusable.length - 1]!
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault()
+      last.focus()
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault()
+      first.focus()
+    }
+  }
+
+  return (
+    <div className="dialog-backdrop danger-backdrop">
+      <form ref={dialogRef} className="confirm-dialog regeneration-dialog" role="alertdialog" aria-modal="true" aria-labelledby="regenerate-world-title" aria-describedby="regenerate-world-description regenerate-world-recovery" onKeyDown={handleKeyDown} onSubmit={(event) => { event.preventDefault(); if (matches && !regenerating && !blockedReason) onConfirm(confirmationName) }}>
+        <span className="confirm-icon"><RotateCcw size={23} /></span>
+        <span className="eyebrow">Destructive world reset</span>
+        <h2 id="regenerate-world-title">Regenerate {instance.name}?</h2>
+        <div className="regeneration-loss" id="regenerate-world-description"><strong>The previous world is wiped before the new one is created.</strong><span>This removes the active Overworld, Nether, and End, including every build, explored chunk, inventory, advancement, and player-data file in those worlds.</span></div>
+        <p id="regenerate-world-recovery">The old active world folders are moved to your recycle bin. Server settings, plugins, and EmberHost backups remain. Minecraft creates the replacement world the next time you start the server.</p>
+        <div className="seed-preview"><span>New world seed</span><code>{displayedSeed}</code></div>
+        {blockedReason && <div className="tool-callout danger regeneration-error" role="status"><AlertTriangle size={17} /><div><strong>Regeneration is temporarily unavailable.</strong><span>{blockedReason}</span></div></div>}
+        {error && <div className="tool-callout danger regeneration-error" role="alert"><AlertTriangle size={17} /><div><strong>The world was not regenerated.</strong><span>{error}</span></div></div>}
+        <label className="field"><span>Enter <strong>{instance.name}</strong> to confirm the wipe</span><input aria-label={`Enter ${instance.name} to confirm world regeneration`} autoFocus value={confirmationName} disabled={regenerating} onChange={(event) => setConfirmationName(event.target.value)} /></label>
+        <div className="confirm-actions"><button type="button" className="button secondary" disabled={regenerating} onClick={onCancel}>Cancel</button><button className="button danger" disabled={!matches || regenerating || Boolean(blockedReason)}>{regenerating ? <LoaderCircle className="spin" size={16} /> : <Trash2 size={16} />} {regenerating ? 'Wiping world...' : 'Wipe and regenerate world'}</button></div>
+      </form>
+    </div>
+  )
+}
+
 export default function App(): React.JSX.Element {
   const [bootstrap, setBootstrap] = useState<BootstrapData | null>(null)
   const [lanAddresses, setLanAddresses] = useState<string[]>([])
@@ -1057,6 +1152,10 @@ export default function App(): React.JSX.Element {
   const [logs, setLogs] = useState<Record<string, ConsoleEntry[]>>({})
   const [worldPreparations, setWorldPreparations] = useState<Record<string, WorldPreparationState>>({})
   const [forceLoadedRegions, setForceLoadedRegions] = useState<Record<string, ForceLoadedRegionsState>>({})
+  const [worldSeeds, setWorldSeeds] = useState<Record<string, string>>({})
+  const [worldSeedLoadingByInstance, setWorldSeedLoadingByInstance] = useState<Record<string, boolean>>({})
+  const [worldSeedErrorsByInstance, setWorldSeedErrorsByInstance] = useState<Record<string, string>>({})
+  const [worldSeedRefreshRequest, setWorldSeedRefreshRequest] = useState(0)
   const [paperPlugins, setPaperPlugins] = useState<Record<string, PaperPluginInfo[]>>({})
   const [paperPluginCatalogs, setPaperPluginCatalogs] = useState<Record<string, CatalogPaperPlugin[]>>({})
   const [busy, setBusy] = useState(false)
@@ -1068,6 +1167,9 @@ export default function App(): React.JSX.Element {
   const [saving, setSaving] = useState(false)
   const [deleteTarget, setDeleteTarget] = useState<InstanceView | null>(null)
   const [deleting, setDeleting] = useState(false)
+  const [regenerationTarget, setRegenerationTarget] = useState<RegenerationTarget | null>(null)
+  const [regenerating, setRegenerating] = useState(false)
+  const [regenerationError, setRegenerationError] = useState<string | null>(null)
   const [appSettingsSaving, setAppSettingsSaving] = useState(false)
   const [toasts, setToasts] = useState<Toast[]>([])
   const [now, setNow] = useState(Date.now())
@@ -1076,11 +1178,18 @@ export default function App(): React.JSX.Element {
   const pluginCatalogRequest = useRef<Record<string, number>>({})
   const lanAddressRequest = useRef(0)
   const lanAddressResolved = useRef(false)
+  const regenerationReturnFocus = useRef<HTMLElement | null>(null)
 
   const selected = useMemo(() => instances.find((instance) => instance.id === selectedId) ?? instances[0] ?? null, [instances, selectedId])
   const selectedLogs = selected ? logs[selected.id] ?? [] : []
   const selectedPreparation = selected ? worldPreparations[selected.id] ?? emptyWorldPreparation(selected.id) : null
   const selectedForceLoads = selected ? forceLoadedRegions[selected.id] ?? emptyForceLoadedRegions(selected.id) : null
+  const selectedWorldSeed = selected ? worldSeeds[selected.id] ?? '' : ''
+  const selectedWorldSeedLoading = selected ? worldSeedLoadingByInstance[selected.id] === true : false
+  const selectedWorldSeedError = selected ? worldSeedErrorsByInstance[selected.id] ?? null : null
+  const selectedWorldSeedReady = selected
+    ? Object.prototype.hasOwnProperty.call(worldSeeds, selected.id) && !selectedWorldSeedLoading && !selectedWorldSeedError
+    : false
   const selectedPlugins = selected ? paperPlugins[selected.id] ?? [] : []
   const selectedPluginCatalog = selected ? paperPluginCatalogs[selected.id] ?? [] : []
   const selectedAddressHost = selectedLanAddress ?? lanAddresses[0] ?? 'localhost'
@@ -1089,6 +1198,19 @@ export default function App(): React.JSX.Element {
   const catalogLoading = selected ? catalogLoadingByInstance[selected.id] === true : false
   const selectedActive = selected?.runtime.status === 'online' || selected?.runtime.status === 'starting'
   const selectedStopping = selected?.runtime.status === 'stopping'
+  const regenerationInstance = regenerationTarget
+    ? instances.find((instance) => instance.id === regenerationTarget.instance.id) ?? regenerationTarget.instance
+    : null
+  const regenerationPreparation = regenerationInstance
+    ? worldPreparations[regenerationInstance.id] ?? emptyWorldPreparation(regenerationInstance.id)
+    : null
+  const regenerationBlockedReason = regenerationInstance?.runtime.status === 'online' || regenerationInstance?.runtime.status === 'starting' || regenerationInstance?.runtime.status === 'stopping'
+    ? 'Stop the server before regenerating its world.'
+    : regenerationPreparation?.status === 'running' || regenerationPreparation?.status === 'paused'
+      ? 'Cancel the active or paused world preparation before regenerating.'
+      : busy || worldBusy
+        ? 'Wait for the current server operation to finish.'
+        : null
 
   const toast = (kind: Toast['kind'], message: string): void => {
     const id = Date.now() + Math.random()
@@ -1118,6 +1240,27 @@ export default function App(): React.JSX.Element {
     setCreateError(null)
     setShowCreate(true)
     void refreshLatestVersion()
+  }
+
+  const beginWorldSeedLoad = (instanceId: string): void => {
+    setWorldSeedLoadingByInstance((values) => ({ ...values, [instanceId]: true }))
+    setWorldSeedErrorsByInstance((values) => { const next = { ...values }; delete next[instanceId]; return next })
+  }
+
+  const openWorldView = (): void => {
+    if (selected && view !== 'world') beginWorldSeedLoad(selected.id)
+    setView('world')
+  }
+
+  const selectInstance = (instanceId: string): void => {
+    if (view === 'world') beginWorldSeedLoad(instanceId)
+    setSelectedId(instanceId)
+  }
+
+  const reloadWorldSeed = (): void => {
+    if (!selected || selectedWorldSeedLoading) return
+    beginWorldSeedLoad(selected.id)
+    setWorldSeedRefreshRequest((request) => request + 1)
   }
 
   useEffect(() => {
@@ -1188,6 +1331,30 @@ export default function App(): React.JSX.Element {
   }, [selected?.id])
 
   useEffect(() => {
+    if (!selected || view !== 'world') return
+    let current = true
+    const instanceId = selected.id
+    setWorldSeedLoadingByInstance((values) => ({ ...values, [instanceId]: true }))
+    setWorldSeedErrorsByInstance((values) => { const next = { ...values }; delete next[instanceId]; return next })
+    void window.emberHost.getWorldSeed(instanceId).then((state) => {
+      if (current) {
+        setWorldSeeds((values) => ({ ...values, [instanceId]: state.seed }))
+        setWorldSeedErrorsByInstance((values) => { const next = { ...values }; delete next[instanceId]; return next })
+      }
+    }).catch((error) => {
+      if (current) {
+        const message = friendlyError(error)
+        setWorldSeeds((values) => { const next = { ...values }; delete next[instanceId]; return next })
+        setWorldSeedErrorsByInstance((values) => ({ ...values, [instanceId]: message }))
+        toast('error', message)
+      }
+    }).finally(() => {
+      if (current) setWorldSeedLoadingByInstance((values) => ({ ...values, [instanceId]: false }))
+    })
+    return () => { current = false }
+  }, [selected?.id, view, worldSeedRefreshRequest])
+
+  useEffect(() => {
     if (!selected || view !== 'plugins' || instanceSoftware(selected).kind !== 'paper') return
     const targetId = selected.id
     const request = (pluginListRequest.current[targetId] ?? 0) + 1
@@ -1249,7 +1416,7 @@ export default function App(): React.JSX.Element {
   }
 
   const startStop = async (): Promise<void> => {
-    if (!selected || busy) return
+    if (!selected || busy || worldBusy || regenerating) return
     setBusy(true)
     try {
       const active = selected.runtime.status === 'online' || selected.runtime.status === 'starting'
@@ -1272,7 +1439,7 @@ export default function App(): React.JSX.Element {
     action: ((api: PaperApi, instanceId: string) => Promise<WorldPreparationState>),
     successMessage: string
   ): Promise<void> => {
-    if (!selected || worldBusy) return
+    if (!selected || worldBusy || busy || regenerating) return
     setWorldBusy(true)
     try {
       const result = await action(window.emberHost as PaperApi, selected.id)
@@ -1301,11 +1468,44 @@ export default function App(): React.JSX.Element {
     void runPreparationAction((api, instanceId) => api.cancelWorldPreparation(instanceId), 'World preparation cancelled safely.')
   }
 
+  const requestWorldRegeneration = (seed: string): void => {
+    if (!selected || regenerating || busy || worldBusy || !selectedWorldSeedReady) return
+    const preparation = worldPreparations[selected.id] ?? emptyWorldPreparation(selected.id)
+    const active = selected.runtime.status === 'online' || selected.runtime.status === 'starting' || selected.runtime.status === 'stopping'
+    if (active || preparation.status === 'running' || preparation.status === 'paused') return
+    regenerationReturnFocus.current = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    setRegenerationError(null)
+    setRegenerationTarget({ instance: selected, seed })
+  }
+
+  const regenerateWorld = async (confirmationName: string): Promise<void> => {
+    if (!regenerationTarget || regenerating || regenerationBlockedReason) return
+    const target = regenerationTarget
+    setRegenerating(true)
+    setRegenerationError(null)
+    try {
+      const result = await window.emberHost.regenerateWorld({
+        instanceId: target.instance.id,
+        seed: target.seed,
+        confirmationName
+      })
+      setWorldSeeds((current) => ({ ...current, [target.instance.id]: result.seed }))
+      setWorldPreparations((current) => ({ ...current, [target.instance.id]: emptyWorldPreparation(target.instance.id) }))
+      setForceLoadedRegions((current) => ({ ...current, [target.instance.id]: emptyForceLoadedRegions(target.instance.id) }))
+      setRegenerationTarget(null)
+      toast('success', result.seed ? `World wiped. Start the server to generate seed ${result.seed}.` : 'World wiped. Start the server to generate a new world with a random seed.')
+    } catch (error) {
+      setRegenerationError(friendlyError(error))
+    } finally {
+      setRegenerating(false)
+    }
+  }
+
   const runForceLoadAction = async (
     action: ((api: PaperApi, instanceId: string) => Promise<ForceLoadedRegionsState>),
     successMessage: string
   ): Promise<void> => {
-    if (!selected || worldBusy) return
+    if (!selected || worldBusy || busy || regenerating) return
     setWorldBusy(true)
     try {
       const result = await action(window.emberHost as PaperApi, selected.id)
@@ -1486,6 +1686,9 @@ export default function App(): React.JSX.Element {
       setLogs((current) => { const next = { ...current }; delete next[target.id]; return next })
       setWorldPreparations((current) => { const next = { ...current }; delete next[target.id]; return next })
       setForceLoadedRegions((current) => { const next = { ...current }; delete next[target.id]; return next })
+      setWorldSeeds((current) => { const next = { ...current }; delete next[target.id]; return next })
+      setWorldSeedLoadingByInstance((current) => { const next = { ...current }; delete next[target.id]; return next })
+      setWorldSeedErrorsByInstance((current) => { const next = { ...current }; delete next[target.id]; return next })
       setPaperPlugins((current) => { const next = { ...current }; delete next[target.id]; return next })
       setPaperPluginCatalogs((current) => { const next = { ...current }; delete next[target.id]; return next })
       setDeleteTarget(null)
@@ -1506,11 +1709,11 @@ export default function App(): React.JSX.Element {
     <div className="app-shell">
       <aside className="sidebar">
         <div className="brand"><BrandMark /><div><strong>EmberHost</strong><small>Server manager</small></div></div>
-        <div className="instance-select-wrap"><span>Active server</span><select aria-label="Active server" value={selected?.id ?? ''} onChange={(event) => setSelectedId(event.target.value)} disabled={!instances.length}>{instances.length ? instances.map((instance) => <option value={instance.id} key={instance.id}>{instance.name}</option>) : <option>No server yet</option>}</select></div>
+        <div className="instance-select-wrap"><span>Active server</span><select aria-label="Active server" value={selected?.id ?? ''} onChange={(event) => selectInstance(event.target.value)} disabled={!instances.length || regenerating}>{instances.length ? instances.map((instance) => <option value={instance.id} key={instance.id}>{instance.name}</option>) : <option>No server yet</option>}</select></div>
         <nav aria-label="Main navigation">
           <span>Workspace</span>
           <button className={view === 'overview' ? 'active' : ''} onClick={() => setView('overview')}><LayoutDashboard size={18} /> Overview</button>
-          <button className={view === 'world' ? 'active' : ''} onClick={() => setView('world')}><Map size={18} /> World tools {selected && instanceSoftware(selected).kind === 'paper' && <span className="nav-new">Paper</span>}</button>
+          <button className={view === 'world' ? 'active' : ''} onClick={openWorldView}><Map size={18} /> World tools</button>
           <button className={view === 'plugins' ? 'active' : ''} onClick={() => setView('plugins')}><Puzzle size={18} /> Plugins {selected && instanceSoftware(selected).kind === 'paper' && <span className="nav-new">Paper</span>}</button>
           <button className={view === 'console' ? 'active' : ''} onClick={() => setView('console')}><SquareTerminal size={18} /> Console {selectedLogs.some((entry) => entry.level === 'error') && <i />}</button>
           <button className={view === 'settings' ? 'active' : ''} onClick={() => setView('settings')}><Settings size={18} /> Settings</button>
@@ -1523,18 +1726,18 @@ export default function App(): React.JSX.Element {
 
       <main className="main-area">
         <header className="topbar">
-          <div><span className="eyebrow">{view === 'overview' ? 'Server workspace' : view === 'world' ? 'Paper operations' : view === 'plugins' ? 'Paper extensions' : view === 'console' ? 'Live operations' : 'Configuration'}</span><h1>{view === 'overview' ? selected?.name ?? 'Your server' : view === 'world' ? 'World tools' : view === 'plugins' ? 'Plugins' : view === 'console' ? 'Console' : 'Settings'}</h1></div>
+          <div><span className="eyebrow">{view === 'overview' ? 'Server workspace' : view === 'world' ? 'World operations' : view === 'plugins' ? 'Paper extensions' : view === 'console' ? 'Live operations' : 'Configuration'}</span><h1>{view === 'overview' ? selected?.name ?? 'Your server' : view === 'world' ? 'World tools' : view === 'plugins' ? 'Plugins' : view === 'console' ? 'Console' : 'Settings'}</h1></div>
           <div className="topbar-actions">
             {selected && <StatusBadge status={selected.runtime.status} />}
             {selected && <button className="icon-button" title="Open server folder" aria-label="Open server folder" onClick={() => void window.emberHost.openServerFolder(selected.id).catch((error) => toast('error', friendlyError(error)))}><FolderOpen size={18} /></button>}
             <button className="button secondary compact" onClick={openCreate}><Plus size={16} /> New server</button>
-            {selected && <button className={`button compact ${selectedActive || selectedStopping ? 'danger' : 'primary'}`} disabled={busy || selectedStopping} onClick={() => void startStop()}>{busy || selectedStopping ? <LoaderCircle className="spin" size={16} /> : selectedActive ? <CircleStop size={16} /> : <Play size={16} />}{selectedStopping ? 'Stopping' : selectedActive ? 'Stop' : 'Start'}</button>}
+            {selected && <button className={`button compact ${selectedActive || selectedStopping ? 'danger' : 'primary'}`} disabled={busy || worldBusy || regenerating || selectedStopping} onClick={() => void startStop()}>{busy || selectedStopping ? <LoaderCircle className="spin" size={16} /> : selectedActive ? <CircleStop size={16} /> : <Play size={16} />}{selectedStopping ? 'Stopping' : selectedActive ? 'Stop' : 'Start'}</button>}
           </div>
         </header>
 
         {selected ? (
-          view === 'overview' ? <Overview instance={selected} address={selectedServerAddress} addressHost={selectedAddressHost} lanAddresses={lanAddresses} localOnly={!lanAddresses.length} logs={selectedLogs} now={now} busy={busy} onStartStop={() => void startStop()} onOpenFolder={() => void window.emberHost.openServerFolder(selected.id).catch((error) => toast('error', friendlyError(error)))} onAddressChange={setSelectedLanAddress} onCopy={() => { void navigator.clipboard.writeText(selectedServerAddress).then(() => toast('info', 'Server address copied.')).catch((error) => toast('error', friendlyError(error))) }} onConsole={() => setView('console')} onWorld={() => setView('world')} />
-             : view === 'world' && selectedPreparation && selectedForceLoads ? <WorldToolsView key={selected.id} instance={selected} preparation={selectedPreparation} forceLoads={selectedForceLoads} busy={worldBusy} onStartPreparation={startWorldPreparation} onPausePreparation={pauseWorldPreparation} onResumePreparation={resumeWorldPreparation} onCancelPreparation={cancelWorldPreparation} onAddForceLoad={addForceLoadedRegion} onRemoveForceLoad={removeForceLoadedRegion} onCreatePaper={openCreate} />
+          view === 'overview' ? <Overview instance={selected} address={selectedServerAddress} addressHost={selectedAddressHost} lanAddresses={lanAddresses} localOnly={!lanAddresses.length} logs={selectedLogs} now={now} busy={busy || worldBusy || regenerating} onStartStop={() => void startStop()} onOpenFolder={() => void window.emberHost.openServerFolder(selected.id).catch((error) => toast('error', friendlyError(error)))} onAddressChange={setSelectedLanAddress} onCopy={() => { void navigator.clipboard.writeText(selectedServerAddress).then(() => toast('info', 'Server address copied.')).catch((error) => toast('error', friendlyError(error))) }} onConsole={() => setView('console')} onWorld={openWorldView} />
+             : view === 'world' && selectedPreparation && selectedForceLoads ? <WorldToolsView key={selected.id} instance={selected} preparation={selectedPreparation} forceLoads={selectedForceLoads} busy={worldBusy || busy} configuredSeed={selectedWorldSeed} seedLoading={selectedWorldSeedLoading} seedReady={selectedWorldSeedReady} seedError={selectedWorldSeedError} regenerating={regenerating} onReloadSeed={reloadWorldSeed} onRegenerateRequest={requestWorldRegeneration} onStartPreparation={startWorldPreparation} onPausePreparation={pauseWorldPreparation} onResumePreparation={resumeWorldPreparation} onCancelPreparation={cancelWorldPreparation} onAddForceLoad={addForceLoadedRegion} onRemoveForceLoad={removeForceLoadedRegion} onCreatePaper={openCreate} />
                : view === 'plugins' ? <PluginsView key={selected.id} instance={selected} plugins={selectedPlugins} catalog={selectedPluginCatalog} loading={pluginLoading} catalogLoading={catalogLoading} busy={pluginBusy || pluginLoading || catalogLoading} installingProjectId={catalogInstall?.instanceId === selected.id ? catalogInstall.projectId : null} onInstall={() => void installPaperPlugin()} onInstallCatalog={(projectId) => void installCatalogPaperPlugin(projectId)} onOpenCatalogSource={openPaperPluginSource} onRemove={(fileName) => void removePaperPlugin(fileName)} onRefresh={() => void refreshPaperPlugins()} onRefreshCatalog={() => void refreshPaperPluginCatalog()} onCreatePaper={openCreate} />
                : view === 'console' ? <ConsoleView key={selected.id} instance={selected} logs={selectedLogs} onSend={sendCommand} />
                 : <SettingsView instance={selected} totalMemoryMb={bootstrap.totalMemoryMb} appSettings={appSettings} saving={saving} appSettingsSaving={appSettingsSaving} deleting={deleting} onSave={saveSettings} onAppSettings={saveAppSettings} onDeleteRequest={() => setDeleteTarget(selected)} />
@@ -1543,6 +1746,7 @@ export default function App(): React.JSX.Element {
 
       {showCreate && <CreateServerDialog bootstrap={bootstrap} canClose={instances.length > 0} progress={createProgress} creating={creating} error={createError} onClose={() => setShowCreate(false)} onCreate={createInstance} />}
       {deleteTarget && <DeleteServerDialog instance={deleteTarget} deleting={deleting} onCancel={() => setDeleteTarget(null)} onConfirm={(confirmationName) => void deleteInstance(confirmationName)} />}
+      {regenerationTarget && regenerationInstance && <RegenerateWorldDialog instance={regenerationInstance} seed={regenerationTarget.seed} regenerating={regenerating} blockedReason={regenerationBlockedReason} error={regenerationError} returnFocus={regenerationReturnFocus.current} onCancel={() => { setRegenerationTarget(null); setRegenerationError(null) }} onConfirm={(confirmationName) => void regenerateWorld(confirmationName)} />}
       <div className="toast-region" aria-live="polite">{toasts.map((item) => <div key={item.id} className={`toast toast-${item.kind}`}>{item.kind === 'error' ? <AlertTriangle size={17} /> : item.kind === 'success' ? <Check size={17} /> : <Clipboard size={17} />}<span>{item.message}</span></div>)}</div>
     </div>
   )
