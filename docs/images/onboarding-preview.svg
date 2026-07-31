@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="650" viewBox="0 0 1200 650" role="img" aria-labelledby="title desc">
+  <title id="title">EmberHost onboarding preview</title>
+  <desc id="desc">A dark green desktop server setup interface.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#0d1117"/><stop offset="1" stop-color="#10171d"/></linearGradient>
+    <linearGradient id="side" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#173029"/><stop offset="1" stop-color="#111921"/></linearGradient>
+  </defs>
+  <rect width="1200" height="650" rx="20" fill="url(#bg)"/>
+  <rect x="115" y="70" width="970" height="510" rx="14" fill="#171e27" stroke="#33404b"/>
+  <path d="M129 70h286v510H129a14 14 0 0 1-14-14V84a14 14 0 0 1 14-14Z" fill="url(#side)"/>
+  <rect x="145" y="103" width="38" height="38" rx="9" fill="#58c878"/><text x="164" y="129" text-anchor="middle" fill="#0d1512" font-family="Segoe UI, sans-serif" font-size="20" font-weight="800">E</text>
+  <text x="195" y="119" fill="#f2f5f7" font-family="Segoe UI, sans-serif" font-size="16" font-weight="700">EmberHost</text><text x="195" y="137" fill="#74808d" font-family="Segoe UI, sans-serif" font-size="10">Server manager</text>
+  <text x="145" y="230" fill="#58c878" font-family="Segoe UI, sans-serif" font-size="10" font-weight="700" letter-spacing="1.5">QUICK SETUP</text>
+  <text x="145" y="270" fill="#f2f5f7" font-family="Segoe UI, sans-serif" font-size="27" font-weight="750">Build a world that</text><text x="145" y="303" fill="#f2f5f7" font-family="Segoe UI, sans-serif" font-size="27" font-weight="750">stays yours.</text>
+  <text x="145" y="333" fill="#a8b3bf" font-family="Segoe UI, sans-serif" font-size="11">A clean vanilla server, downloaded</text><text x="145" y="351" fill="#a8b3bf" font-family="Segoe UI, sans-serif" font-size="11">directly from Mojang.</text>
+  <circle cx="153" cy="407" r="13" fill="#58c878"/><text x="153" y="411" text-anchor="middle" fill="#0d1512" font-family="Segoe UI, sans-serif" font-size="10" font-weight="700">1</text><text x="180" y="411" fill="#f2f5f7" font-family="Segoe UI, sans-serif" font-size="11">Server basics</text>
+  <circle cx="153" cy="450" r="13" fill="none" stroke="#40505c"/><text x="153" y="454" text-anchor="middle" fill="#74808d" font-family="Segoe UI, sans-serif" font-size="10">2</text><text x="180" y="454" fill="#74808d" font-family="Segoe UI, sans-serif" font-size="11">Performance &amp; network</text>
+  <circle cx="153" cy="493" r="13" fill="none" stroke="#40505c"/><text x="153" y="497" text-anchor="middle" fill="#74808d" font-family="Segoe UI, sans-serif" font-size="10">3</text><text x="180" y="497" fill="#74808d" font-family="Segoe UI, sans-serif" font-size="11">Review &amp; create</text>
+  <text x="475" y="134" fill="#58c878" font-family="Segoe UI, sans-serif" font-size="11" font-weight="700">01</text><text x="515" y="137" fill="#f2f5f7" font-family="Segoe UI, sans-serif" font-size="23" font-weight="750">Name your server</text>
+  <text x="475" y="191" fill="#a8b3bf" font-family="Segoe UI, sans-serif" font-size="10">Server name</text><rect x="475" y="205" width="545" height="50" rx="8" fill="#121920" stroke="#3b4854"/><text x="491" y="236" fill="#f2f5f7" font-family="Segoe UI, sans-serif" font-size="12">My Minecraft Server</text>
+  <text x="475" y="288" fill="#a8b3bf" font-family="Segoe UI, sans-serif" font-size="10">Message of the day</text><rect x="475" y="302" width="545" height="50" rx="8" fill="#121920" stroke="#293440"/><text x="491" y="333" fill="#f2f5f7" font-family="Segoe UI, sans-serif" font-size="12">A world hosted with EmberHost</text>
+  <rect x="475" y="383" width="545" height="68" rx="9" fill="#121920" stroke="#39784c"/><rect x="490" y="397" width="40" height="40" rx="8" fill="#163527"/><text x="548" y="413" fill="#f2f5f7" font-family="Segoe UI, sans-serif" font-size="12" font-weight="700">Vanilla · Java Edition</text><text x="548" y="432" fill="#74808d" font-family="Segoe UI, sans-serif" font-size="10">Latest stable release</text><circle cx="996" cy="417" r="13" fill="#58c878"/><path d="m990 417 4 4 8-9" fill="none" stroke="#0d1512" stroke-width="2"/>
+  <line x1="475" y1="516" x2="1020" y2="516" stroke="#293440"/><rect x="890" y="531" width="130" height="39" rx="8" fill="#58c878"/><text x="955" y="555" text-anchor="middle" fill="#0d1512" font-family="Segoe UI, sans-serif" font-size="12" font-weight="750">Continue  ›</text>
+</svg>
