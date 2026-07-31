@@ -47,6 +47,7 @@ try {
   if (!releaseOptions.some((option) => option.startsWith('1.20.1')) || !releaseOptions.some((option) => option.startsWith('1.0'))) {
     throw new Error(`Official Mojang release catalog was incomplete: ${JSON.stringify(releaseOptions.slice(-12))}`)
   }
+  await window.locator('input[name="software"][value="vanilla"]').check()
   await releaseSelect.selectOption('1.20.1')
   await window.getByText('Official Mojang server · Requires Java 17').waitFor({ timeout: 25_000 })
   await releaseSelect.selectOption('1.0')
