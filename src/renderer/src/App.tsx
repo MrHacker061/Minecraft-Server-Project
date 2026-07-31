@@ -32,6 +32,7 @@ import {
   RotateCcw,
   Rocket,
   Save,
+  Search,
   Server,
   Settings,
   ShieldAlert,
@@ -48,6 +49,8 @@ import { FormEvent, useEffect, useMemo, useRef, useState } from 'react'
 import type {
   AppSettings,
   BootstrapData,
+  CatalogPaperPlugin,
+  CatalogPluginInstallInput,
   ConsoleEntry,
   CreateInstanceInput,
   ForceLoadedRegionsState,
@@ -121,6 +124,10 @@ function friendlyError(error: unknown): string {
 function formatBytes(value: number): string {
   if (value < 1024 * 1024) return `${Math.max(1, Math.round(value / 1024))} KB`
   return `${(value / 1024 / 1024).toFixed(1)} MB`
+}
+
+function categoryLabel(value: string): string {
+  return value.replace(/[-_]+/g, ' ').replace(/\b\w/g, (letter) => letter.toUpperCase())
 }
 
 function formatUptime(startedAt: string | null, now: number): string {
@@ -682,18 +689,80 @@ function WorldToolsView({
   )
 }
 
-function PluginsView({ instance, plugins, loading, busy, onInstall, onRemove, onRefresh, onCreatePaper }: {
+function CatalogPluginCard({ plugin, minecraftVersion, active, busy, installing, onInstall, onOpenSource }: {
+  plugin: CatalogPaperPlugin
+  minecraftVersion: string
+  active: boolean
+  busy: boolean
+  installing: boolean
+  onInstall: () => void
+  onOpenSource: () => void
+}): React.JSX.Element {
+  const installable = plugin.compatible && Boolean(plugin.latestVersion)
+  const needsDependency = !plugin.compatible && Boolean(plugin.latestVersion) && Boolean(plugin.requirements.length)
+  const buttonLabel = plugin.installed
+    ? 'Installed'
+    : needsDependency
+      ? 'Dependency needed'
+    : !installable
+      ? 'Not compatible'
+      : active
+        ? 'Stop Paper'
+        : 'Install'
+  return (
+    <article className={`catalog-card ${plugin.installed ? 'installed' : ''} ${!installable ? 'incompatible' : ''}`}>
+      <div className="catalog-card-heading">
+        <span className="catalog-avatar" aria-hidden="true">{plugin.name.slice(0, 2).toLocaleUpperCase()}</span>
+        <div><span>{categoryLabel(plugin.category)}</span><h3>{plugin.name}</h3><small>by {plugin.author}</small></div>
+        {plugin.installed
+          ? <span className="catalog-state installed"><Check size={11} /> Installed</span>
+          : <span className={`catalog-state ${installable ? 'compatible' : 'incompatible'}`}>{installable ? <ShieldCheck size={11} /> : needsDependency ? <Info size={11} /> : <OctagonX size={11} />}{installable ? 'Compatible' : needsDependency ? 'Needs dependency' : 'Unavailable'}</span>}
+      </div>
+      <p>{plugin.description}</p>
+      {plugin.requirements.length ? <div className="catalog-requirements">{plugin.requirements.map((requirement) => <span key={requirement}>Requires {requirement}</span>)}</div> : null}
+      {!installable && plugin.unavailableReason && <p className="catalog-unavailable"><Info size={12} /> {plugin.unavailableReason}</p>}
+      <div className="catalog-meta"><span>{formatCount(plugin.downloads)} downloads</span><span>{plugin.license || 'License unknown'}</span><span>{plugin.latestVersion ? `Latest v${plugin.latestVersion}` : `No ${minecraftVersion} release`}</span></div>
+      <div className="catalog-card-actions">
+        <button type="button" className="catalog-source" onClick={onOpenSource}>View on Modrinth <ExternalLink size={13} /></button>
+        <button type="button" className={`button compact ${plugin.installed ? 'secondary' : 'primary'}`} disabled={busy || active || plugin.installed || !installable} title={needsDependency ? plugin.unavailableReason ?? 'Install the required plugin first.' : !installable ? `No compatible release for Minecraft ${minecraftVersion}.` : active ? 'Stop Paper before installing plugins.' : plugin.installed ? 'This plugin is already installed.' : `Install ${plugin.name}`} onClick={onInstall}>{installing ? <LoaderCircle className="spin" size={14} /> : plugin.installed ? <Check size={14} /> : <PackagePlus size={14} />}{installing ? 'Installing' : buttonLabel}</button>
+      </div>
+    </article>
+  )
+}
+
+function PluginsView({ instance, plugins, catalog, loading, catalogLoading, busy, installingProjectId, onInstall, onInstallCatalog, onOpenCatalogSource, onRemove, onRefresh, onRefreshCatalog, onCreatePaper }: {
   instance: InstanceView
   plugins: PaperPluginInfo[]
+  catalog: CatalogPaperPlugin[]
   loading: boolean
+  catalogLoading: boolean
   busy: boolean
+  installingProjectId: string | null
   onInstall: () => void
+  onInstallCatalog: (projectId: string) => void
+  onOpenCatalogSource: (projectId: string) => void
   onRemove: (fileName: string) => void
   onRefresh: () => void
+  onRefreshCatalog: () => void
   onCreatePaper: () => void
 }): React.JSX.Element {
+  const [query, setQuery] = useState('')
+  const [category, setCategory] = useState('all')
   const paper = instanceSoftware(instance).kind === 'paper'
   const active = instance.runtime.status !== 'offline' && instance.runtime.status !== 'crashed'
+  const categories = useMemo(() => [...new Set(catalog.map((plugin) => plugin.category))].sort((left, right) => left.localeCompare(right)), [catalog])
+  useEffect(() => {
+    if (category !== 'all' && !categories.includes(category)) setCategory('all')
+  }, [categories, category])
+  const visibleCatalog = useMemo(() => {
+    const normalizedQuery = query.trim().toLocaleLowerCase()
+    return catalog.filter((plugin) => {
+      if (category !== 'all' && plugin.category !== category) return false
+      if (!normalizedQuery) return true
+      return [plugin.name, plugin.slug, plugin.description, plugin.author, plugin.category]
+        .some((value) => value.toLocaleLowerCase().includes(normalizedQuery))
+    })
+  }, [catalog, category, query])
   return (
     <div className="page-content plugins-content">
       {!paper && (
@@ -704,9 +773,40 @@ function PluginsView({ instance, plugins, loading, busy, onInstall, onRemove, on
         </section>
       )}
 
+      <section className={`plugin-panel catalog-panel ${!paper ? 'paper-disabled' : ''}`} aria-disabled={!paper} aria-labelledby="catalog-title">
+        <div className="plugin-heading">
+          <div><span className="panel-icon catalog-icon"><Sparkles size={19} /></span><div><span className="eyebrow">Curated catalog</span><h2 id="catalog-title">Recommended Paper plugins</h2><p>Discover trusted project pages with a compatible release for Minecraft {instance.version}.</p></div></div>
+          <button className="icon-button" aria-label="Refresh plugin catalog" title="Refresh plugin catalog" disabled={!paper || catalogLoading || busy} onClick={onRefreshCatalog}><RotateCcw className={catalogLoading ? 'spin' : ''} size={17} /></button>
+        </div>
+
+        <div className="tool-callout success catalog-trust"><ShieldCheck size={17} /><div><strong>Review the upstream project before installing.</strong><span>Every card shows its author, license, compatibility, and source. EmberHost verifies the selected release before placing it in your server.</span></div></div>
+        {paper && active && <div className="tool-callout neutral"><Info size={17} /><div><strong>Stop Paper to install a catalog plugin.</strong><span>Plugin changes are intentionally locked while the Java process is active.</span></div></div>}
+
+        <div className="catalog-toolbar">
+          <label className="catalog-search"><Search size={16} /><input aria-label="Search curated plugins" value={query} disabled={!paper} onChange={(event) => setQuery(event.target.value)} placeholder="Search by name, author, or feature" /></label>
+          <label className="catalog-category"><span>Category</span><select aria-label="Plugin category" value={category} disabled={!paper || !categories.length} onChange={(event) => setCategory(event.target.value)}><option value="all">All categories</option>{categories.map((value) => <option key={value} value={value}>{categoryLabel(value)}</option>)}</select></label>
+          <span className="catalog-count">{visibleCatalog.length} of {catalog.length}</span>
+        </div>
+
+        <div className="catalog-grid" aria-label="Curated Paper plugin catalog" aria-busy={catalogLoading}>
+          {catalogLoading ? <div className="catalog-empty"><LoaderCircle className="spin" size={25} /><strong>Finding compatible plugins...</strong><span>Checking curated projects for Minecraft {instance.version}.</span></div>
+            : visibleCatalog.length ? visibleCatalog.map((plugin) => <CatalogPluginCard
+                key={plugin.projectId}
+                plugin={plugin}
+                minecraftVersion={instance.version}
+                active={active}
+                busy={busy}
+                installing={installingProjectId === plugin.projectId}
+                onInstall={() => onInstallCatalog(plugin.projectId)}
+                onOpenSource={() => onOpenCatalogSource(plugin.projectId)}
+              />)
+            : <div className="catalog-empty"><Search size={25} /><strong>{catalog.length ? 'No plugins match these filters' : 'The catalog is unavailable'}</strong><span>{catalog.length ? 'Try a broader search or choose All categories.' : 'Refresh the catalog when you are online.'}</span></div>}
+        </div>
+      </section>
+
       <section className={`plugin-panel ${!paper ? 'paper-disabled' : ''}`} aria-disabled={!paper}>
         <div className="plugin-heading">
-          <div><span className="panel-icon"><Puzzle size={19} /></span><div><span className="eyebrow">Local plugin library</span><h2>Paper plugins</h2><p>Add a plugin JAR from this computer, then start Paper to load it.</p></div></div>
+          <div><span className="panel-icon"><Puzzle size={19} /></span><div><span className="eyebrow">Installed and local</span><h2>Paper plugins</h2><p>Manage installed plugins or add a JAR from this computer.</p></div></div>
           <div className="plugin-heading-actions">
             <button className="icon-button" aria-label="Refresh plugin list" title="Refresh plugin list" disabled={!paper || loading || busy} onClick={onRefresh}><RotateCcw className={loading ? 'spin' : ''} size={17} /></button>
             <button className="button primary" disabled={!paper || active || busy} onClick={onInstall}>{busy ? <LoaderCircle className="spin" size={16} /> : <PackagePlus size={16} />} Add plugin JAR</button>
@@ -723,11 +823,11 @@ function PluginsView({ instance, plugins, loading, busy, onInstall, onRemove, on
           ) : plugins.length ? plugins.map((plugin) => (
             <article className="plugin-row" key={plugin.fileName}>
               <span className={`plugin-icon ${plugin.builtIn ? 'built-in' : ''}`}><Puzzle size={18} /></span>
-              <div className="plugin-copy"><div><strong>{plugin.name ?? plugin.fileName.replace(/\.jar$/i, '')}</strong>{plugin.builtIn && <span className="plugin-badge">EmberHost built-in</span>}{!plugin.managed && <span className="plugin-badge neutral">External</span>}</div><span>{plugin.fileName}{plugin.version ? ` · version ${plugin.version}` : ''} · {formatBytes(plugin.sizeBytes)}</span></div>
+              <div className="plugin-copy"><div><strong>{plugin.name ?? plugin.fileName.replace(/\.jar$/i, '')}</strong>{plugin.builtIn && <span className="plugin-badge">EmberHost built-in</span>}{plugin.catalogProjectId && <span className="plugin-badge catalog">Catalog</span>}{!plugin.managed && <span className="plugin-badge neutral">External</span>}</div><span>{plugin.fileName}{plugin.version ? ` · version ${plugin.version}` : ''} · {formatBytes(plugin.sizeBytes)}</span></div>
               <button className="button danger compact" disabled={active || busy || plugin.builtIn} title={plugin.builtIn ? 'Chunky powers World Preparation and cannot be removed.' : 'Move this plugin to Trash'} onClick={() => onRemove(plugin.fileName)}><Trash2 size={15} /> Remove</button>
             </article>
           )) : (
-            <div className="plugin-empty"><Puzzle size={27} /><strong>No optional plugins installed</strong><span>Choose Add plugin JAR to install one. Chunky appears here on Paper servers created by EmberHost.</span></div>
+            <div className="plugin-empty"><Puzzle size={27} /><strong>No optional plugins installed</strong><span>Install from the curated catalog or choose Add plugin JAR. Chunky appears here on Paper servers created by EmberHost.</span></div>
           )}
         </div>
       </section>
@@ -924,10 +1024,13 @@ export default function App(): React.JSX.Element {
   const [worldPreparations, setWorldPreparations] = useState<Record<string, WorldPreparationState>>({})
   const [forceLoadedRegions, setForceLoadedRegions] = useState<Record<string, ForceLoadedRegionsState>>({})
   const [paperPlugins, setPaperPlugins] = useState<Record<string, PaperPluginInfo[]>>({})
+  const [paperPluginCatalogs, setPaperPluginCatalogs] = useState<Record<string, CatalogPaperPlugin[]>>({})
   const [busy, setBusy] = useState(false)
   const [worldBusy, setWorldBusy] = useState(false)
-  const [pluginLoading, setPluginLoading] = useState(false)
+  const [pluginLoadingByInstance, setPluginLoadingByInstance] = useState<Record<string, boolean>>({})
+  const [catalogLoadingByInstance, setCatalogLoadingByInstance] = useState<Record<string, boolean>>({})
   const [pluginBusy, setPluginBusy] = useState(false)
+  const [catalogInstall, setCatalogInstall] = useState<{ instanceId: string; projectId: string } | null>(null)
   const [saving, setSaving] = useState(false)
   const [deleteTarget, setDeleteTarget] = useState<InstanceView | null>(null)
   const [deleting, setDeleting] = useState(false)
@@ -935,12 +1038,17 @@ export default function App(): React.JSX.Element {
   const [toasts, setToasts] = useState<Toast[]>([])
   const [now, setNow] = useState(Date.now())
   const [appSettings, setAppSettings] = useState<AppSettings>({ launchAtLogin: false, minimizeToTray: true })
+  const pluginListRequest = useRef<Record<string, number>>({})
+  const pluginCatalogRequest = useRef<Record<string, number>>({})
 
   const selected = useMemo(() => instances.find((instance) => instance.id === selectedId) ?? instances[0] ?? null, [instances, selectedId])
   const selectedLogs = selected ? logs[selected.id] ?? [] : []
   const selectedPreparation = selected ? worldPreparations[selected.id] ?? emptyWorldPreparation(selected.id) : null
   const selectedForceLoads = selected ? forceLoadedRegions[selected.id] ?? emptyForceLoadedRegions(selected.id) : null
   const selectedPlugins = selected ? paperPlugins[selected.id] ?? [] : []
+  const selectedPluginCatalog = selected ? paperPluginCatalogs[selected.id] ?? [] : []
+  const pluginLoading = selected ? pluginLoadingByInstance[selected.id] === true : false
+  const catalogLoading = selected ? catalogLoadingByInstance[selected.id] === true : false
   const selectedActive = selected?.runtime.status === 'online' || selected?.runtime.status === 'starting'
   const selectedStopping = selected?.runtime.status === 'stopping'
 
@@ -1008,16 +1116,44 @@ export default function App(): React.JSX.Element {
 
   useEffect(() => {
     if (!selected || view !== 'plugins' || instanceSoftware(selected).kind !== 'paper') return
-    let cancelled = false
-    setPluginLoading(true)
-    void window.emberHost.getPaperPlugins(selected.id).then((plugins) => {
-      if (!cancelled) setPaperPlugins((current) => ({ ...current, [selected.id]: plugins }))
+    const targetId = selected.id
+    const request = (pluginListRequest.current[targetId] ?? 0) + 1
+    pluginListRequest.current[targetId] = request
+    setPluginLoadingByInstance((current) => ({ ...current, [targetId]: true }))
+    void window.emberHost.getPaperPlugins(targetId).then((plugins) => {
+      if (request === pluginListRequest.current[targetId]) setPaperPlugins((current) => ({ ...current, [targetId]: plugins }))
     }).catch((error) => {
-      if (!cancelled) toast('error', friendlyError(error))
+      if (request === pluginListRequest.current[targetId]) toast('error', friendlyError(error))
     }).finally(() => {
-      if (!cancelled) setPluginLoading(false)
+      if (request === pluginListRequest.current[targetId]) setPluginLoadingByInstance((current) => ({ ...current, [targetId]: false }))
     })
-    return () => { cancelled = true }
+    return () => {
+      if (request === pluginListRequest.current[targetId]) {
+        pluginListRequest.current[targetId] = request + 1
+        setPluginLoadingByInstance((current) => ({ ...current, [targetId]: false }))
+      }
+    }
+  }, [selected?.id, view])
+
+  useEffect(() => {
+    if (!selected || view !== 'plugins' || instanceSoftware(selected).kind !== 'paper') return
+    const targetId = selected.id
+    const request = (pluginCatalogRequest.current[targetId] ?? 0) + 1
+    pluginCatalogRequest.current[targetId] = request
+    setCatalogLoadingByInstance((current) => ({ ...current, [targetId]: true }))
+    void window.emberHost.getPaperPluginCatalog(targetId).then((catalog) => {
+      if (request === pluginCatalogRequest.current[targetId]) setPaperPluginCatalogs((current) => ({ ...current, [targetId]: catalog }))
+    }).catch((error) => {
+      if (request === pluginCatalogRequest.current[targetId]) toast('error', friendlyError(error))
+    }).finally(() => {
+      if (request === pluginCatalogRequest.current[targetId]) setCatalogLoadingByInstance((current) => ({ ...current, [targetId]: false }))
+    })
+    return () => {
+      if (request === pluginCatalogRequest.current[targetId]) {
+        pluginCatalogRequest.current[targetId] = request + 1
+        setCatalogLoadingByInstance((current) => ({ ...current, [targetId]: false }))
+      }
+    }
   }, [selected?.id, view])
 
   const createInstance = async (input: PaperCreateInput): Promise<void> => {
@@ -1119,23 +1255,92 @@ export default function App(): React.JSX.Element {
 
   const refreshPaperPlugins = async (): Promise<void> => {
     if (!selected || instanceSoftware(selected).kind !== 'paper') return
-    setPluginLoading(true)
+    const target = selected
+    const request = (pluginListRequest.current[target.id] ?? 0) + 1
+    pluginListRequest.current[target.id] = request
+    setPluginLoadingByInstance((current) => ({ ...current, [target.id]: true }))
     try {
-      const plugins = await window.emberHost.getPaperPlugins(selected.id)
-      setPaperPlugins((current) => ({ ...current, [selected.id]: plugins }))
+      const plugins = await window.emberHost.getPaperPlugins(target.id)
+      if (request === pluginListRequest.current[target.id]) setPaperPlugins((current) => ({ ...current, [target.id]: plugins }))
+    } catch (error) {
+      if (request === pluginListRequest.current[target.id]) toast('error', friendlyError(error))
+    } finally {
+      if (request === pluginListRequest.current[target.id]) setPluginLoadingByInstance((current) => ({ ...current, [target.id]: false }))
+    }
+  }
+
+  const refreshPaperPluginCatalog = async (): Promise<void> => {
+    if (!selected || instanceSoftware(selected).kind !== 'paper') return
+    const target = selected
+    const request = (pluginCatalogRequest.current[target.id] ?? 0) + 1
+    pluginCatalogRequest.current[target.id] = request
+    setCatalogLoadingByInstance((current) => ({ ...current, [target.id]: true }))
+    try {
+      const catalog = await window.emberHost.getPaperPluginCatalog(target.id)
+      if (request === pluginCatalogRequest.current[target.id]) setPaperPluginCatalogs((current) => ({ ...current, [target.id]: catalog }))
+    } catch (error) {
+      if (request === pluginCatalogRequest.current[target.id]) toast('error', friendlyError(error))
+    } finally {
+      if (request === pluginCatalogRequest.current[target.id]) setCatalogLoadingByInstance((current) => ({ ...current, [target.id]: false }))
+    }
+  }
+
+  const openPaperPluginSource = (projectId: string): void => {
+    void window.emberHost.openPaperPluginPage(projectId).catch((error) => toast('error', friendlyError(error)))
+  }
+
+  const installCatalogPaperPlugin = async (projectId: string): Promise<void> => {
+    if (!selected || pluginBusy || pluginLoading || catalogLoading || instanceSoftware(selected).kind !== 'paper') return
+    const target = selected
+    const catalogPlugin = selectedPluginCatalog.find((plugin) => plugin.projectId === projectId)
+    if (!catalogPlugin || !catalogPlugin.compatible || !catalogPlugin.latestVersion) return
+    setPluginBusy(true)
+    setCatalogInstall({ instanceId: target.id, projectId })
+    try {
+      const api = window.emberHost
+      const input: CatalogPluginInstallInput = { instanceId: target.id, projectId }
+      const plugins = await api.installCatalogPaperPlugin(input)
+      pluginListRequest.current[target.id] = (pluginListRequest.current[target.id] ?? 0) + 1
+      setPluginLoadingByInstance((current) => ({ ...current, [target.id]: false }))
+      setPaperPlugins((current) => ({ ...current, [target.id]: plugins }))
+      toast('success', `${catalogPlugin.name} was installed. Start Paper to load it.`)
+      const request = (pluginCatalogRequest.current[target.id] ?? 0) + 1
+      pluginCatalogRequest.current[target.id] = request
+      setCatalogLoadingByInstance((current) => ({ ...current, [target.id]: true }))
+      void api.getPaperPluginCatalog(target.id).then((catalog) => {
+        if (request === pluginCatalogRequest.current[target.id]) setPaperPluginCatalogs((current) => ({ ...current, [target.id]: catalog }))
+      }).catch((error) => {
+        if (request === pluginCatalogRequest.current[target.id]) toast('error', `The plugin was installed, but the catalog could not refresh. ${friendlyError(error)}`)
+      }).finally(() => {
+        if (request === pluginCatalogRequest.current[target.id]) setCatalogLoadingByInstance((current) => ({ ...current, [target.id]: false }))
+      })
     } catch (error) {
       toast('error', friendlyError(error))
     } finally {
-      setPluginLoading(false)
+      setCatalogInstall(null)
+      setPluginBusy(false)
     }
   }
 
   const installPaperPlugin = async (): Promise<void> => {
-    if (!selected || pluginBusy) return
+    if (!selected || pluginBusy || pluginLoading || catalogLoading) return
+    const target = selected
     setPluginBusy(true)
     try {
-      const result = await window.emberHost.choosePaperPlugin(selected.id)
-      setPaperPlugins((current) => ({ ...current, [selected.id]: result.plugins }))
+      const result = await window.emberHost.choosePaperPlugin(target.id)
+      pluginListRequest.current[target.id] = (pluginListRequest.current[target.id] ?? 0) + 1
+      setPluginLoadingByInstance((current) => ({ ...current, [target.id]: false }))
+      setPaperPlugins((current) => ({ ...current, [target.id]: result.plugins }))
+      if (!result.canceled) {
+        const request = (pluginCatalogRequest.current[target.id] ?? 0) + 1
+        pluginCatalogRequest.current[target.id] = request
+        setCatalogLoadingByInstance((current) => ({ ...current, [target.id]: true }))
+        void window.emberHost.getPaperPluginCatalog(target.id).then((catalog) => {
+          if (request === pluginCatalogRequest.current[target.id]) setPaperPluginCatalogs((current) => ({ ...current, [target.id]: catalog }))
+        }).catch(() => undefined).finally(() => {
+          if (request === pluginCatalogRequest.current[target.id]) setCatalogLoadingByInstance((current) => ({ ...current, [target.id]: false }))
+        })
+      }
       if (!result.canceled && result.installed) toast('success', `${result.installed.name ?? result.installed.fileName} was added. Start Paper to load it.`)
     } catch (error) {
       toast('error', friendlyError(error))
@@ -1145,11 +1350,22 @@ export default function App(): React.JSX.Element {
   }
 
   const removePaperPlugin = async (fileName: string): Promise<void> => {
-    if (!selected || pluginBusy) return
+    if (!selected || pluginBusy || pluginLoading || catalogLoading) return
+    const target = selected
     setPluginBusy(true)
     try {
-      const plugins = await window.emberHost.removePaperPlugin({ instanceId: selected.id, fileName })
-      setPaperPlugins((current) => ({ ...current, [selected.id]: plugins }))
+      const plugins = await window.emberHost.removePaperPlugin({ instanceId: target.id, fileName })
+      pluginListRequest.current[target.id] = (pluginListRequest.current[target.id] ?? 0) + 1
+      setPluginLoadingByInstance((current) => ({ ...current, [target.id]: false }))
+      setPaperPlugins((current) => ({ ...current, [target.id]: plugins }))
+      const request = (pluginCatalogRequest.current[target.id] ?? 0) + 1
+      pluginCatalogRequest.current[target.id] = request
+      setCatalogLoadingByInstance((current) => ({ ...current, [target.id]: true }))
+      void window.emberHost.getPaperPluginCatalog(target.id).then((catalog) => {
+        if (request === pluginCatalogRequest.current[target.id]) setPaperPluginCatalogs((current) => ({ ...current, [target.id]: catalog }))
+      }).catch(() => undefined).finally(() => {
+        if (request === pluginCatalogRequest.current[target.id]) setCatalogLoadingByInstance((current) => ({ ...current, [target.id]: false }))
+      })
       toast('success', `${fileName} was moved to the recycle bin.`)
     } catch (error) {
       toast('error', friendlyError(error))
@@ -1198,6 +1414,7 @@ export default function App(): React.JSX.Element {
       setWorldPreparations((current) => { const next = { ...current }; delete next[target.id]; return next })
       setForceLoadedRegions((current) => { const next = { ...current }; delete next[target.id]; return next })
       setPaperPlugins((current) => { const next = { ...current }; delete next[target.id]; return next })
+      setPaperPluginCatalogs((current) => { const next = { ...current }; delete next[target.id]; return next })
       setDeleteTarget(null)
       setView('overview')
       if (!remaining.length) setShowCreate(true)
@@ -1245,7 +1462,7 @@ export default function App(): React.JSX.Element {
         {selected ? (
           view === 'overview' ? <Overview instance={selected} address={`${bootstrap.lanAddresses[0] ?? 'localhost'}:${selected.port}`} logs={selectedLogs} now={now} busy={busy} onStartStop={() => void startStop()} onOpenFolder={() => void window.emberHost.openServerFolder(selected.id).catch((error) => toast('error', friendlyError(error)))} onCopy={() => { void navigator.clipboard.writeText(`${bootstrap.lanAddresses[0] ?? 'localhost'}:${selected.port}`).then(() => toast('info', 'Server address copied.')).catch((error) => toast('error', friendlyError(error))) }} onConsole={() => setView('console')} onWorld={() => setView('world')} />
              : view === 'world' && selectedPreparation && selectedForceLoads ? <WorldToolsView key={selected.id} instance={selected} preparation={selectedPreparation} forceLoads={selectedForceLoads} busy={worldBusy} onStartPreparation={startWorldPreparation} onPausePreparation={pauseWorldPreparation} onResumePreparation={resumeWorldPreparation} onCancelPreparation={cancelWorldPreparation} onAddForceLoad={addForceLoadedRegion} onRemoveForceLoad={removeForceLoadedRegion} onCreatePaper={openCreate} />
-              : view === 'plugins' ? <PluginsView key={selected.id} instance={selected} plugins={selectedPlugins} loading={pluginLoading} busy={pluginBusy} onInstall={() => void installPaperPlugin()} onRemove={(fileName) => void removePaperPlugin(fileName)} onRefresh={() => void refreshPaperPlugins()} onCreatePaper={openCreate} />
+               : view === 'plugins' ? <PluginsView key={selected.id} instance={selected} plugins={selectedPlugins} catalog={selectedPluginCatalog} loading={pluginLoading} catalogLoading={catalogLoading} busy={pluginBusy || pluginLoading || catalogLoading} installingProjectId={catalogInstall?.instanceId === selected.id ? catalogInstall.projectId : null} onInstall={() => void installPaperPlugin()} onInstallCatalog={(projectId) => void installCatalogPaperPlugin(projectId)} onOpenCatalogSource={openPaperPluginSource} onRemove={(fileName) => void removePaperPlugin(fileName)} onRefresh={() => void refreshPaperPlugins()} onRefreshCatalog={() => void refreshPaperPluginCatalog()} onCreatePaper={openCreate} />
                : view === 'console' ? <ConsoleView key={selected.id} instance={selected} logs={selectedLogs} onSend={sendCommand} />
                 : <SettingsView instance={selected} totalMemoryMb={bootstrap.totalMemoryMb} appSettings={appSettings} saving={saving} appSettingsSaving={appSettingsSaving} deleting={deleting} onSave={saveSettings} onAppSettings={saveAppSettings} onDeleteRequest={() => setDeleteTarget(selected)} />
         ) : <div className="empty-workspace"><div className="brand-mark large"><span>E</span></div><h2>Create your first server</h2><p>Start with recommended Paper performance or choose the official Vanilla experience.</p><button className="button primary" onClick={openCreate}><Plus size={17} /> Create a server</button></div>}

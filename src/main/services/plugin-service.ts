@@ -46,6 +46,8 @@ interface PluginMetadata {
   installedAt: string
   name: string | null
   version: string | null
+  catalogProjectId?: string
+  catalogVersionId?: string
 }
 
 interface PluginManifest {
@@ -72,11 +74,18 @@ interface ZipDescriptor {
 
 export type TrashPluginFile = (filePath: string) => Promise<void>
 
+export interface CatalogPluginProvenance {
+  projectId: string
+  versionId: string
+}
+
 const metadataSchema = z.object({
   sha256: z.string().regex(/^[a-f0-9]{64}$/),
   installedAt: z.string().min(1).max(64),
   name: z.string().min(1).max(256).nullable(),
-  version: z.string().min(1).max(256).nullable()
+  version: z.string().min(1).max(256).nullable(),
+  catalogProjectId: z.string().regex(/^[A-Za-z0-9]{8}$/).optional(),
+  catalogVersionId: z.string().regex(/^[A-Za-z0-9]{8}$/).optional()
 })
 
 const manifestSchema = z.object({
@@ -324,14 +333,16 @@ export class PluginService {
   constructor(
     private readonly store: AppStore,
     private readonly manager: PluginManager | ServerManager,
-    private readonly trashFile: TrashPluginFile
+    private readonly trashFile: TrashPluginFile,
+    private readonly cleanupTemporaryFile: (filePath: string) => Promise<void> =
+      (filePath) => rm(filePath, { force: true })
   ) {}
 
   async list(instanceId: string): Promise<PaperPluginInfo[]> {
-    return this.manager.runExclusive(instanceId, () => this.listUnlocked(instanceId))
+    return this.manager.runExclusive(instanceId, () => this.listWithinExclusive(instanceId))
   }
 
-  private async listUnlocked(instanceId: string): Promise<PaperPluginInfo[]> {
+  async listWithinExclusive(instanceId: string): Promise<PaperPluginInfo[]> {
     const instance = this.requirePaper(instanceId)
     const pluginDirectory = await this.safePluginDirectory(instance, false)
     if (!pluginDirectory) return []
@@ -355,82 +366,124 @@ export class PluginService {
           sizeBytes: fileStats.size,
           installedAt: managed && !builtIn ? metadata?.installedAt ?? null : null,
           managed,
-          builtIn
+          builtIn,
+          catalogProjectId: managed && !builtIn ? metadata?.catalogProjectId ?? null : null,
+          catalogVersionId: managed && !builtIn ? metadata?.catalogVersionId ?? null : null
         }
       }))
     return plugins.sort((left, right) => Number(right.builtIn) - Number(left.builtIn) || left.fileName.localeCompare(right.fileName))
   }
 
-  async installFromPath(instanceId: string, sourcePath: string): Promise<PaperPluginInfo[]> {
-    return this.manager.runExclusive(instanceId, async () => {
-      const instance = this.requirePaper(instanceId)
-      this.assertStopped(instanceId)
-      const fileName = basename(sourcePath)
-      assertSafePluginFilename(fileName)
-      const sourceStats = await lstat(sourcePath).catch((error: unknown) => {
-        if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-          throw pluginError('The selected plugin file no longer exists.', 'PLUGIN_FILE_NOT_FOUND')
-        }
-        throw error
-      })
-      if (!sourceStats.isFile()) throw pluginError('The selected item is not a regular file.')
-      await inspectPluginJar(sourcePath)
+  async installFromPath(
+    instanceId: string,
+    sourcePath: string,
+    provenance?: CatalogPluginProvenance
+  ): Promise<PaperPluginInfo[]> {
+    return this.manager.runExclusive(instanceId, () =>
+      this.installFromPathWithinExclusive(instanceId, sourcePath, provenance))
+  }
 
-      const pluginDirectory = await this.safePluginDirectory(instance, true)
-      if (!pluginDirectory) throw new AppError('The plugins folder could not be created.', 'PLUGIN_DIRECTORY_MISSING')
-      const existing = await readdir(pluginDirectory)
-      if (existing.some((entry) => entry.toLowerCase() === fileName.toLowerCase())) {
-        throw pluginError(
-          `A plugin named ${fileName} is already installed. Remove it before installing a replacement.`,
-          'PLUGIN_ALREADY_EXISTS'
-        )
+  async installFromPathWithinExclusive(
+    instanceId: string,
+    sourcePath: string,
+    provenance?: CatalogPluginProvenance
+  ): Promise<PaperPluginInfo[]> {
+    const instance = this.requirePaper(instanceId)
+    this.assertStopped(instanceId)
+    if (provenance && (
+      !/^[A-Za-z0-9]{8}$/.test(provenance.projectId) ||
+      !/^[A-Za-z0-9]{8}$/.test(provenance.versionId)
+    )) {
+      throw pluginError('The plugin catalog provenance is invalid.', 'INVALID_CATALOG_PROVENANCE')
+    }
+    const fileName = basename(sourcePath)
+    assertSafePluginFilename(fileName)
+    const sourceStats = await lstat(sourcePath).catch((error: unknown) => {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        throw pluginError('The selected plugin file no longer exists.', 'PLUGIN_FILE_NOT_FOUND')
       }
-
-      const targetPath = join(pluginDirectory, fileName)
-      const temporaryPath = join(pluginDirectory, `.emberhost-plugin-${randomUUID()}.tmp`)
-      let linkedByUs = false
-      try {
-        await copyFile(sourcePath, temporaryPath, fsConstants.COPYFILE_EXCL)
-        const inspected = await inspectPluginJar(temporaryPath)
-        try {
-          await link(temporaryPath, targetPath)
-          linkedByUs = true
-        } catch (error) {
-          if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
-            throw pluginError(
-              `A plugin named ${fileName} was added while EmberHost was installing it.`,
-              'PLUGIN_ALREADY_EXISTS'
-            )
-          }
-          throw error
-        }
-
-        const manifest = await this.readManifest(pluginDirectory)
-        manifest.plugins[fileName] = {
-          sha256: inspected.sha256,
-          installedAt: new Date().toISOString(),
-          name: inspected.name,
-          version: inspected.version
-        }
-        await this.writeManifest(pluginDirectory, manifest)
-      } catch (error) {
-        if (linkedByUs) {
-          try {
-            await rm(targetPath)
-          } catch (rollbackError) {
-            throw new AppError(
-              'The plugin install failed, and EmberHost could not remove the uncommitted JAR.',
-              'PLUGIN_INSTALL_ROLLBACK_FAILED',
-              rollbackError instanceof Error ? rollbackError.message : undefined
-            )
-          }
-        }
-        throw error
-      } finally {
-        await rm(temporaryPath, { force: true })
-      }
-      return this.listUnlocked(instanceId)
+      throw error
     })
+    if (!sourceStats.isFile()) throw pluginError('The selected item is not a regular file.')
+    await inspectPluginJar(sourcePath)
+
+    const pluginDirectory = await this.safePluginDirectory(instance, true)
+    if (!pluginDirectory) throw new AppError('The plugins folder could not be created.', 'PLUGIN_DIRECTORY_MISSING')
+    const existing = await readdir(pluginDirectory)
+    if (existing.some((entry) => entry.toLowerCase() === fileName.toLowerCase())) {
+      throw pluginError(
+        `A plugin named ${fileName} is already installed. Remove it before installing a replacement.`,
+        'PLUGIN_ALREADY_EXISTS'
+      )
+    }
+    // Capture the return state before the commit. Re-reading every JAR after the manifest is
+    // written could fail for an unrelated locked plugin and falsely report this install as failed.
+    const pluginsBeforeInstall = await this.listWithinExclusive(instanceId)
+
+    const targetPath = join(pluginDirectory, fileName)
+    const temporaryPath = join(pluginDirectory, `.emberhost-plugin-${randomUUID()}.tmp`)
+    let linkedByUs = false
+    let committedPlugin: PaperPluginInfo | null = null
+    try {
+      await copyFile(sourcePath, temporaryPath, fsConstants.COPYFILE_EXCL)
+      const inspected = await inspectPluginJar(temporaryPath)
+      try {
+        await link(temporaryPath, targetPath)
+        linkedByUs = true
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
+          throw pluginError(
+            `A plugin named ${fileName} was added while EmberHost was installing it.`,
+            'PLUGIN_ALREADY_EXISTS'
+          )
+        }
+        throw error
+      }
+
+      const manifest = await this.readManifest(pluginDirectory)
+      const installedAt = new Date().toISOString()
+      manifest.plugins[fileName] = {
+        sha256: inspected.sha256,
+        installedAt,
+        name: inspected.name,
+        version: inspected.version,
+        ...(provenance
+          ? { catalogProjectId: provenance.projectId, catalogVersionId: provenance.versionId }
+          : {})
+      }
+      await this.writeManifest(pluginDirectory, manifest)
+      committedPlugin = {
+        fileName,
+        name: inspected.name,
+        version: inspected.version,
+        sizeBytes: inspected.sizeBytes,
+        installedAt,
+        managed: true,
+        builtIn: false,
+        catalogProjectId: provenance?.projectId ?? null,
+        catalogVersionId: provenance?.versionId ?? null
+      }
+    } catch (error) {
+      if (linkedByUs) {
+        try {
+          await rm(targetPath)
+        } catch (rollbackError) {
+          throw new AppError(
+            'The plugin install failed, and EmberHost could not remove the uncommitted JAR.',
+            'PLUGIN_INSTALL_ROLLBACK_FAILED',
+            rollbackError instanceof Error ? rollbackError.message : undefined
+          )
+        }
+      }
+      throw error
+    } finally {
+      // Cleanup is post-commit bookkeeping. Do not tell the renderer an install failed merely
+      // because antivirus temporarily kept this non-JAR staging file open.
+      await this.cleanupTemporaryFile(temporaryPath).catch(() => undefined)
+    }
+    if (!committedPlugin) throw pluginError('The plugin install did not commit.', 'PLUGIN_INSTALL_FAILED')
+    return [...pluginsBeforeInstall, committedPlugin]
+      .sort((left, right) => Number(right.builtIn) - Number(left.builtIn) || left.fileName.localeCompare(right.fileName))
   }
 
   async remove(instanceId: string, fileName: string): Promise<PaperPluginInfo[]> {
@@ -504,7 +557,7 @@ export class PluginService {
       } finally {
         if (!keepRollback) await rm(rollbackPath, { force: true })
       }
-      return this.listUnlocked(instanceId)
+      return this.listWithinExclusive(instanceId)
     })
   }
 

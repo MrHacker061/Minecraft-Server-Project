@@ -1,6 +1,6 @@
 {
   "name": "emberhost",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "A polished desktop manager for self-hosted Minecraft Java servers.",
   "private": true,
   "main": "./out/main/index.js",

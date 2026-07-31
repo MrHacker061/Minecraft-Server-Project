@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { mkdtemp, mkdir, readFile, readdir, rename, rm, symlink, truncate, writeFile } from 'node:fs/promises'
+import { access, mkdtemp, mkdir, readFile, readdir, rename, rm, symlink, truncate, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { deflateRawSync } from 'node:zlib'
@@ -106,7 +106,10 @@ function instance(serverDirectory: string, kind: 'paper' | 'vanilla' = 'paper'):
   }
 }
 
-async function harness(kind: 'paper' | 'vanilla' = 'paper'): Promise<{
+async function harness(
+  kind: 'paper' | 'vanilla' = 'paper',
+  cleanupTemporaryFile?: (filePath: string) => Promise<void>
+): Promise<{
   directory: string
   server: ServerInstance
   manager: FakeManager
@@ -123,12 +126,17 @@ async function harness(kind: 'paper' | 'vanilla' = 'paper'): Promise<{
   const manager = new FakeManager()
   const trashDirectory = join(directory, 'trash')
   const trashed: string[] = []
-  const service = new PluginService(store, manager, async (filePath) => {
-    await mkdir(trashDirectory, { recursive: true })
-    const destination = join(trashDirectory, `${trashed.length}-${filePath.split(/[\\/]/).at(-1)}`)
-    await rename(filePath, destination)
-    trashed.push(destination)
-  })
+  const service = new PluginService(
+    store,
+    manager,
+    async (filePath) => {
+      await mkdir(trashDirectory, { recursive: true })
+      const destination = join(trashDirectory, `${trashed.length}-${filePath.split(/[\\/]/).at(-1)}`)
+      await rename(filePath, destination)
+      trashed.push(destination)
+    },
+    cleanupTemporaryFile
+  )
   return { directory, server, manager, service, trashed }
 }
 
@@ -153,6 +161,52 @@ describe('PluginService', () => {
     const manifest = await readFile(join(server.serverDirectory, 'plugins', '.emberhost-plugins.json'), 'utf8')
     expect(manifest).toContain('TestPlugin-1.2.3.jar')
     expect(manifest).toMatch(/[a-f0-9]{64}/)
+  })
+
+  it('does not report a committed install as failed when staging cleanup is locked', async () => {
+    const cleanupTemporaryFile = vi.fn(async () => {
+      throw new Error('simulated antivirus lock')
+    })
+    const { directory, server, service } = await harness('paper', cleanupTemporaryFile)
+    const source = join(directory, 'LockedCleanupPlugin.jar')
+    await writeStoredJar(source)
+
+    await expect(service.installFromPath(server.id, source)).resolves.toEqual([
+      expect.objectContaining({ fileName: 'LockedCleanupPlugin.jar', managed: true })
+    ])
+    expect(cleanupTemporaryFile).toHaveBeenCalledOnce()
+    await expect(access(join(server.serverDirectory, 'plugins', 'LockedCleanupPlugin.jar'))).resolves.toBeUndefined()
+  })
+
+  it('records validated catalog provenance without trusting renderer-supplied paths', async () => {
+    const { directory, server, service } = await harness()
+    const source = join(directory, 'TestPlugin.jar')
+    await writeStoredJar(source)
+
+    const plugins = await service.installFromPath(server.id, source, {
+      projectId: 'Vebnzrzj',
+      versionId: 'MBSY8toc'
+    })
+
+    expect(plugins).toEqual([expect.objectContaining({
+      catalogProjectId: 'Vebnzrzj',
+      catalogVersionId: 'MBSY8toc'
+    })])
+    const manifest = await readFile(join(server.serverDirectory, 'plugins', '.emberhost-plugins.json'), 'utf8')
+    expect(manifest).toContain('"catalogProjectId": "Vebnzrzj"')
+    expect(manifest).toContain('"catalogVersionId": "MBSY8toc"')
+  })
+
+  it('rejects malformed catalog provenance before copying the plugin', async () => {
+    const { directory, server, service } = await harness()
+    const source = join(directory, 'TestPlugin.jar')
+    await writeStoredJar(source)
+
+    await expect(service.installFromPath(server.id, source, {
+      projectId: '../escape',
+      versionId: 'MBSY8toc'
+    })).rejects.toMatchObject({ code: 'INVALID_CATALOG_PROVENANCE' })
+    await expect(readdir(join(server.serverDirectory, 'plugins'))).rejects.toMatchObject({ code: 'ENOENT' })
   })
 
   it('rejects non-JAR data and archives without a Paper plugin descriptor', async () => {

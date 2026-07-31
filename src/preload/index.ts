@@ -3,6 +3,7 @@ import { channels } from '../shared/channels'
 import type {
   AppSettings,
   AddForceLoadedRegionInput,
+  CatalogPluginInstallInput,
   ConsoleEntry,
   CreateInstanceInput,
   DeleteInstanceInput,
@@ -46,6 +47,9 @@ const api: EmberHostApi = {
   getPaperPlugins: (id: string) => ipcRenderer.invoke(channels.getPaperPlugins, id),
   choosePaperPlugin: (id: string) => ipcRenderer.invoke(channels.choosePaperPlugin, id),
   removePaperPlugin: (input: RemovePaperPluginInput) => ipcRenderer.invoke(channels.removePaperPlugin, input),
+  getPaperPluginCatalog: (id: string) => ipcRenderer.invoke(channels.getPaperPluginCatalog, id),
+  installCatalogPaperPlugin: (input: CatalogPluginInstallInput) => ipcRenderer.invoke(channels.installCatalogPaperPlugin, input),
+  openPaperPluginPage: (projectId: string) => ipcRenderer.invoke(channels.openPaperPluginPage, projectId),
   onSetupProgress: (listener: (progress: SetupProgress) => void) => {
     const callback = (_event: Electron.IpcRendererEvent, progress: SetupProgress): void => listener(progress)
     ipcRenderer.on(channels.setupProgress, callback)

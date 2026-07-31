@@ -1,4 +1,4 @@
-import { access, mkdir, rm, writeFile } from 'node:fs/promises'
+import { access, mkdir, readdir, rm, writeFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import { _electron as electron } from 'playwright-core'
 
@@ -105,6 +105,22 @@ try {
     throw new Error('Paper server selection did not stick.')
   }
   await window.getByText('Paper plugins', { exact: true }).waitFor()
+  await window.getByText('Recommended Paper plugins', { exact: true }).waitFor()
+  await window.locator('.catalog-card').first().waitFor({ timeout: 45_000 })
+  if (await window.locator('.catalog-card').count() !== 12) throw new Error('The curated plugin catalog did not render all 12 projects.')
+  await window.locator('.catalog-card h3').getByText('LuckPerms', { exact: true }).waitFor()
+  const catalogSearch = window.getByLabel('Search curated plugins')
+  await catalogSearch.fill('permissions')
+  if (await catalogSearch.inputValue() !== 'permissions') throw new Error('Plugin catalog search did not accept input.')
+  await catalogSearch.fill('')
+  if (await window.getByLabel('Plugin category').inputValue() !== 'all') throw new Error('Plugin catalog did not default to all categories.')
+  if (await window.locator('.catalog-grid img').count()) throw new Error('Catalog rendered remote icons despite the renderer CSP policy.')
+  const luckPermsCard = window.locator('.catalog-card').filter({ has: window.locator('h3', { hasText: 'LuckPerms' }) })
+  await luckPermsCard.getByRole('button', { name: 'Install', exact: true }).click()
+  await luckPermsCard.locator('.catalog-state.installed').waitFor({ timeout: 120_000 })
+  await window.locator('.plugin-row').filter({ hasText: 'LuckPerms' }).waitFor()
+  const installedFiles = await readdir(resolve(paperServerDirectory, 'plugins'))
+  if (!installedFiles.some((fileName) => /^LuckPerms.*\.jar$/i.test(fileName))) throw new Error('The verified catalog JAR was not installed.')
   await window.getByText('Chunky', { exact: true }).waitFor()
   await window.getByText('ExamplePlugin', { exact: true }).waitFor()
   await window.screenshot({ path: resolve(artifacts, 'paper-plugins.png') })

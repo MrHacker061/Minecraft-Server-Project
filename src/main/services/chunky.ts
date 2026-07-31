@@ -124,7 +124,7 @@ export async function resolveChunkyForPaper(minecraftVersion: string): Promise<R
   let response: Response
   try {
     response = await fetch(url, {
-      headers: { 'User-Agent': 'EmberHost/0.3.0 (github.com/MrHacker061/Minecraft-Server-Project)' },
+      headers: { 'User-Agent': 'EmberHost/0.4.0 (github.com/MrHacker061/Minecraft-Server-Project)' },
       redirect: 'error',
       signal: AbortSignal.timeout(20_000)
     })
@@ -193,7 +193,7 @@ export async function downloadChunky(
   let response: Response
   try {
     response = await fetch(version.file.url, {
-      headers: { 'User-Agent': 'EmberHost/0.3.0 (github.com/MrHacker061/Minecraft-Server-Project)' },
+      headers: { 'User-Agent': 'EmberHost/0.4.0 (github.com/MrHacker061/Minecraft-Server-Project)' },
       redirect: 'error',
       signal: AbortSignal.timeout(120_000)
     })

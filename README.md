@@ -25,6 +25,7 @@ EmberHost is a desktop control panel for turning a personal computer into a self
 - Sends a graceful stop command before escalating after a timeout.
 - Streams output into a live console and a persistent, size-capped instance log.
 - Persists multiple server configurations with atomic, schema-versioned JSON.
+- Browses a curated catalog of common Paper plugins and resolves releases for the server's exact Minecraft version.
 - Adds, inventories, and removes local Paper plugin JARs while the server is stopped.
 - Moves deleted server folders and removable plugins to the operating system recycle bin instead of permanently erasing them.
 - Preserves unknown comments and keys when updating server.properties.
@@ -35,7 +36,9 @@ The tray process can run continuously while the desktop user remains signed in. 
 
 ## Paper, plugins, and mods
 
-Paper supports Bukkit, Spigot, and Paper plugins. EmberHost installs the verified Chunky Paper plugin automatically because the World Tools screen depends on it. The **Plugins** screen can then import additional local `.jar` files. EmberHost checks the archive structure, requires a root `plugin.yml` or `paper-plugin.yml`, enforces size and filename limits, and copies it atomically without loading or executing it. Stop Paper before adding or removing plugins; changes load on the next start.
+Paper supports Bukkit, Spigot, and Paper plugins. EmberHost installs the verified Chunky Paper plugin automatically because the World Tools screen depends on it. The **Plugins** screen includes a searchable, category-filtered catalog of 12 curated projects and still supports importing a local `.jar` file.
+
+Catalog compatibility is resolved live from Modrinth for the server's exact Minecraft version and the Paper loader. Only listed stable releases are eligible for quick installation. EmberHost restricts downloads to the selected allowlisted project on Modrinth's CDN, verifies the declared byte size and SHA-512 hash, validates the JAR structure, and copies it atomically without loading or executing it. Projects with no exact stable release remain visible as unavailable instead of receiving a guessed build. Stop Paper before adding or removing plugins; changes load on the next start.
 
 Plugins run with the same operating-system access as the Minecraft server. Only install plugins from developers you trust and confirm that the plugin supports the selected Minecraft and Paper versions. Chunky is protected from removal because World Preparation depends on it. Other removals go through the recycle bin.
 
@@ -92,7 +95,7 @@ pnpm dist       # platform installer
 3. Select a performance profile and review the required Java version, memory, player limit, and port.
 4. Read and explicitly accept the [Minecraft EULA](https://www.minecraft.net/en-us/eula).
 5. Select **Download & create**, then start the server.
-6. Open **Plugins** on a stopped Paper server to add a trusted plugin JAR.
+6. Open **Plugins** on a stopped Paper server to browse the curated catalog or add a trusted local plugin JAR.
 7. Open **World Tools** on a Paper server to prepare terrain or add small force-loaded regions.
 
 Mojang's manifest includes a few very early client releases for which it no longer publishes a server artifact. EmberHost shows those releases but refuses creation with a clear message rather than downloading an unofficial or unverifiable JAR.
@@ -146,7 +149,7 @@ Electron main process
     ├─ instance service ── Mojang, Paper, and Modrinth metadata/downloads
     ├─ server manager ──── Java lifecycle, console, and health samples
     ├─ world service ───── backups, Chunky tasks, and bounded force-loads
-    ├─ plugin service ──── JAR validation, inventory, and recycle-bin removal
+    ├─ plugin service ──── catalog resolution, verified installs, inventory, and removal
     └─ atomic store ────── app data and per-instance metadata
 ~~~
 
@@ -156,7 +159,7 @@ Safeguards include contextIsolation, disabled Node integration, renderer sandbox
 
 EmberHost is independent and is not affiliated with or endorsed by Mojang, Microsoft, PaperMC, Modrinth, or Chunky.
 
-It does not bundle Minecraft server software. Downloads happen on the user's computer from the URLs provided by [Mojang](https://www.minecraft.net/en-us/download/server) or [PaperMC](https://papermc.io/downloads/paper). Paper operation follows the [Paper getting-started documentation](https://docs.papermc.io/paper/getting-started/), and pregeneration uses the [official Chunky workflow](https://github.com/pop4959/Chunky/wiki/Pregeneration).
+It does not bundle Minecraft server software or optional catalog plugins. Downloads happen on the user's computer from the URLs provided by [Mojang](https://www.minecraft.net/en-us/download/server), [PaperMC](https://papermc.io/downloads/paper), or an explicitly selected [Modrinth](https://modrinth.com/) project. Paper operation follows the [Paper getting-started documentation](https://docs.papermc.io/paper/getting-started/), plugin handling follows [Paper's plugin guidance](https://docs.papermc.io/paper/adding-plugins/), and pregeneration uses the [official Chunky workflow](https://github.com/pop4959/Chunky/wiki/Pregeneration).
 
 See the [Minecraft EULA](https://www.minecraft.net/en-us/eula), [PaperMC terms](https://papermc.io/terms), and upstream plugin licenses. EmberHost's original source is under the [MIT License](LICENSE); third-party attribution is in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 

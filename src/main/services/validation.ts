@@ -41,6 +41,13 @@ export const removePaperPluginSchema = z.object({
     .regex(/^[^<>:"/\\|?*\u0000-\u001f]+\.jar$/i, 'Invalid plugin file name.')
 })
 
+export const catalogPluginInstallSchema = z.object({
+  instanceId: instanceIdSchema,
+  projectId: z.string().regex(/^[A-Za-z0-9]{8}$/, 'Invalid catalog project ID.')
+})
+
+export const catalogProjectIdSchema = z.string().regex(/^[A-Za-z0-9]{8}$/, 'Invalid catalog project ID.')
+
 export const updateInstanceSchema = z.object({
   id: instanceIdSchema,
   name: serverName,

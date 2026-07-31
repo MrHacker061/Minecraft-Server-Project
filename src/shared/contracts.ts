@@ -159,6 +159,8 @@ export interface PaperPluginInfo {
   installedAt: string | null
   managed: boolean
   builtIn: boolean
+  catalogProjectId?: string | null
+  catalogVersionId?: string | null
 }
 
 export interface PluginInstallResult {
@@ -170,6 +172,29 @@ export interface PluginInstallResult {
 export interface RemovePaperPluginInput {
   instanceId: string
   fileName: string
+}
+
+export interface CatalogPaperPlugin {
+  projectId: string
+  slug: string
+  name: string
+  description: string
+  category: string
+  author: string
+  iconUrl: string | null
+  downloads: number
+  compatible: boolean
+  installed: boolean
+  latestVersion: string | null
+  license: string
+  sourceUrl: string
+  unavailableReason: string | null
+  requirements: string[]
+}
+
+export interface CatalogPluginInstallInput {
+  instanceId: string
+  projectId: string
 }
 
 export interface UpdateInstanceInput {
@@ -239,6 +264,9 @@ export interface EmberHostApi {
   getPaperPlugins: (id: string) => Promise<PaperPluginInfo[]>
   choosePaperPlugin: (id: string) => Promise<PluginInstallResult>
   removePaperPlugin: (input: RemovePaperPluginInput) => Promise<PaperPluginInfo[]>
+  getPaperPluginCatalog: (id: string) => Promise<CatalogPaperPlugin[]>
+  installCatalogPaperPlugin: (input: CatalogPluginInstallInput) => Promise<PaperPluginInfo[]>
+  openPaperPluginPage: (projectId: string) => Promise<void>
   onSetupProgress: (listener: (progress: SetupProgress) => void) => () => void
   onConsoleEntry: (listener: (entry: ConsoleEntry) => void) => () => void
   onStateChange: (listener: (event: StateEvent) => void) => () => void

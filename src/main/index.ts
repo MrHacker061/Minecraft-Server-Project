@@ -9,12 +9,15 @@ import { InstanceService } from './services/instance-service'
 import { checkJava } from './services/java'
 import { listOfficialReleases, resolveLatestRelease, resolveRelease } from './services/minecraft'
 import { resolveLatestPaperBuild } from './services/paper'
+import { catalogPluginPageUrl, PluginCatalogService } from './services/plugin-catalog'
 import { PluginService } from './services/plugin-service'
 import { ServerManager } from './services/server-manager'
 import { AppStore } from './services/store'
 import { validateForceLoadedRegionInput, validateWorldPreparationInput, WorldService } from './services/world-service'
 import {
   appSettingsSchema,
+  catalogPluginInstallSchema,
+  catalogProjectIdSchema,
   commandSchema,
   createInstanceSchema,
   deleteInstanceSchema,
@@ -41,6 +44,7 @@ let manager: ServerManager
 let instanceService: InstanceService
 let worldService: WorldService
 let pluginService: PluginService
+let pluginCatalogService: PluginCatalogService
 
 if (!gotSingleInstanceLock) app.quit()
 
@@ -388,6 +392,19 @@ function registerIpc(): void {
     const parsed = parseOrThrow(removePaperPluginSchema.safeParse(input))
     return pluginService.remove(parsed.instanceId, parsed.fileName)
   })
+  handle(channels.getPaperPluginCatalog, (_event, id) => {
+    const parsedId = parseOrThrow(instanceIdSchema.safeParse(id))
+    return pluginCatalogService.list(parsedId)
+  })
+  handle(channels.installCatalogPaperPlugin, (_event, input) => {
+    assertCanMutate()
+    const parsed = parseOrThrow(catalogPluginInstallSchema.safeParse(input))
+    return pluginCatalogService.install(parsed.instanceId, parsed.projectId)
+  })
+  handle(channels.openPaperPluginPage, (_event, projectId) => {
+    const parsedProjectId = parseOrThrow(catalogProjectIdSchema.safeParse(projectId))
+    return shell.openExternal(catalogPluginPageUrl(parsedProjectId))
+  })
 }
 
 async function initialize(): Promise<void> {
@@ -398,6 +415,7 @@ async function initialize(): Promise<void> {
   instanceService = new InstanceService(store, manager, dataDirectory, (itemPath) => shell.trashItem(itemPath))
   worldService = new WorldService(store, manager)
   pluginService = new PluginService(store, manager, (itemPath) => shell.trashItem(itemPath))
+  pluginCatalogService = new PluginCatalogService(store, manager, pluginService)
   manager.onConsole((entry) => mainWindow?.webContents.send(channels.consoleEntry, entry))
   manager.onState((event) => {
     mainWindow?.webContents.send(channels.stateChange, event)
