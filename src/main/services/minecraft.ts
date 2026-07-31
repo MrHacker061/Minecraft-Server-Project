@@ -2,28 +2,34 @@ import { createHash } from 'node:crypto'
 import { createReadStream } from 'node:fs'
 import { mkdir, open, rename, rm, stat } from 'node:fs/promises'
 import { dirname } from 'node:path'
+import { z } from 'zod'
 import type { LatestVersion, SetupProgress } from '../../shared/contracts'
 import { AppError } from './errors'
 
 const VERSION_MANIFEST = 'https://piston-meta.mojang.com/mc/game/version_manifest_v2.json'
 
-interface VersionManifest {
-  latest: { release: string }
-  versions: Array<{ id: string; type: string; url: string }>
-}
+const versionId = z.string().min(1).max(64).regex(/^[A-Za-z0-9._-]+$/)
+const serverDownloadSchema = z.object({
+  sha1: z.string().regex(/^[a-f0-9]{40}$/i),
+  size: z.number().int().positive().max(1024 * 1024 * 1024),
+  url: z.string().url()
+})
+const versionManifestSchema = z.object({
+  latest: z.object({ release: versionId }),
+  versions: z.array(z.object({
+    id: z.string().min(1).max(128),
+    type: z.string().min(1).max(32),
+    url: z.string().url()
+  })).max(100_000)
+})
+const versionDetailsSchema = z.object({
+  id: versionId,
+  type: z.string().min(1).max(32),
+  javaVersion: z.object({ majorVersion: z.number().int().positive().max(100) }),
+  downloads: z.object({ server: serverDownloadSchema.optional() })
+})
 
-interface VersionDetails {
-  id: string
-  type: string
-  javaVersion?: { majorVersion?: number }
-  downloads?: {
-    server?: {
-      sha1: string
-      size: number
-      url: string
-    }
-  }
-}
+type VersionManifest = z.infer<typeof versionManifestSchema>
 
 export interface ResolvedServerVersion extends LatestVersion {
   download: {
@@ -37,6 +43,9 @@ function assertTrustedUrl(rawUrl: string): void {
   const url = new URL(rawUrl)
   const trusted =
     url.protocol === 'https:' &&
+    url.username === '' &&
+    url.password === '' &&
+    url.port === '' &&
     (url.hostname === 'launchermeta.mojang.com' ||
       url.hostname === 'piston-meta.mojang.com' ||
       url.hostname.endsWith('.mojang.com') ||
@@ -44,12 +53,13 @@ function assertTrustedUrl(rawUrl: string): void {
   if (!trusted) throw new AppError('Mojang returned an unexpected download location.', 'UNTRUSTED_DOWNLOAD')
 }
 
-async function fetchJson<T>(url: string): Promise<T> {
+async function fetchJson<T>(url: string, schema: z.ZodType<T>): Promise<T> {
   assertTrustedUrl(url)
   let response: Response
   try {
     response = await fetch(url, {
-      headers: { 'User-Agent': 'EmberHost/0.1.0' },
+      headers: { 'User-Agent': 'EmberHost/0.2.0' },
+      redirect: 'error',
       signal: AbortSignal.timeout(20_000)
     })
   } catch (error) {
@@ -63,16 +73,33 @@ async function fetchJson<T>(url: string): Promise<T> {
     throw new AppError(`Mojang returned HTTP ${response.status}. Try again in a moment.`, 'MOJANG_ERROR')
   }
   assertTrustedUrl(response.url)
-  return (await response.json()) as T
+  let payload: unknown
+  try {
+    payload = await response.json()
+  } catch (error) {
+    throw new AppError(
+      'Mojang returned unreadable metadata.',
+      'INVALID_MOJANG_METADATA',
+      error instanceof Error ? error.message : undefined
+    )
+  }
+  const parsed = schema.safeParse(payload)
+  if (!parsed.success) throw new AppError('Mojang returned invalid metadata.', 'INVALID_MOJANG_METADATA')
+  return parsed.data
 }
 
 async function resolveManifestRelease(manifest: VersionManifest, releaseId: string): Promise<ResolvedServerVersion> {
   const entry = manifest.versions?.find((version) => version.id === releaseId && version.type === 'release')
   if (!entry) throw new AppError(`Mojang did not list release ${releaseId}.`, 'VERSION_NOT_FOUND')
 
-  const details = await fetchJson<VersionDetails>(entry.url)
+  const details = await fetchJson(entry.url, versionDetailsSchema)
+  if (details.id !== releaseId || details.type !== 'release') {
+    throw new AppError('Mojang returned metadata for a different release.', 'INVALID_MOJANG_METADATA')
+  }
   const serverDownload = details.downloads?.server
-  if (!serverDownload?.url || !serverDownload.sha1 || !serverDownload.size) {
+  if (
+    !serverDownload?.url
+  ) {
     throw new AppError(`Minecraft ${releaseId} does not provide a vanilla server download.`, 'SERVER_JAR_NOT_FOUND')
   }
   assertTrustedUrl(serverDownload.url)
@@ -80,20 +107,20 @@ async function resolveManifestRelease(manifest: VersionManifest, releaseId: stri
   return {
     id: releaseId,
     type: 'release',
-    requiredJavaVersion: details.javaVersion?.majorVersion ?? 21,
+    requiredJavaVersion: details.javaVersion.majorVersion,
     download: serverDownload
   }
 }
 
 export async function resolveLatestRelease(): Promise<ResolvedServerVersion> {
-  const manifest = await fetchJson<VersionManifest>(VERSION_MANIFEST)
+  const manifest = await fetchJson(VERSION_MANIFEST, versionManifestSchema)
   const releaseId = manifest.latest?.release
   if (!releaseId) throw new AppError('Mojang did not list a latest release.', 'VERSION_NOT_FOUND')
   return resolveManifestRelease(manifest, releaseId)
 }
 
 export async function resolveRelease(releaseId: string): Promise<ResolvedServerVersion> {
-  const manifest = await fetchJson<VersionManifest>(VERSION_MANIFEST)
+  const manifest = await fetchJson(VERSION_MANIFEST, versionManifestSchema)
   return resolveManifestRelease(manifest, releaseId)
 }
 
@@ -125,12 +152,13 @@ export async function downloadServerJar(
   assertTrustedUrl(version.download.url)
   await mkdir(dirname(destination), { recursive: true })
   const partial = `${destination}.part`
-  await rm(partial, { force: true })
+  await Promise.all([rm(destination, { force: true }), rm(partial, { force: true })])
 
   let response: Response
   try {
     response = await fetch(version.download.url, {
-      headers: { 'User-Agent': 'EmberHost/0.1.0' },
+      headers: { 'User-Agent': 'EmberHost/0.2.0' },
+      redirect: 'error',
       signal: AbortSignal.timeout(120_000)
     })
   } catch (error) {
@@ -153,6 +181,11 @@ export async function downloadServerJar(
     while (true) {
       const { done, value } = await reader.read()
       if (done) break
+      if (received + value.byteLength > version.download.size) {
+        streamError = new AppError('The server download exceeded its signed metadata size.', 'DOWNLOAD_SIZE_MISMATCH')
+        await reader.cancel().catch(() => undefined)
+        break
+      }
       await file.write(value)
       received += value.byteLength
       const ratio = Math.min(received / version.download.size, 1)

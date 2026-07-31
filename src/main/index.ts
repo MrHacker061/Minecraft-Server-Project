@@ -8,13 +8,16 @@ import { AppError, toPublicError } from './services/errors'
 import { InstanceService } from './services/instance-service'
 import { checkJava } from './services/java'
 import { resolveLatestRelease } from './services/minecraft'
+import { resolveLatestPaperBuild } from './services/paper'
 import { ServerManager } from './services/server-manager'
 import { AppStore } from './services/store'
+import { validateForceLoadedRegionInput, validateWorldPreparationInput, WorldService } from './services/world-service'
 import {
   appSettingsSchema,
   commandSchema,
   createInstanceSchema,
   instanceIdSchema,
+  removeForceLoadedRegionSchema,
   updateInstanceSchema,
   validationMessage
 } from './services/validation'
@@ -32,6 +35,7 @@ let shutdownStarted = false
 let store: AppStore
 let manager: ServerManager
 let instanceService: InstanceService
+let worldService: WorldService
 
 if (!gotSingleInstanceLock) app.quit()
 
@@ -127,7 +131,12 @@ function rebuildTrayMenu(): void {
           void action.catch(() => undefined)
         }
       },
-      { label: `Minecraft ${instance.version}`, enabled: false }
+      {
+        label: instance.software.kind === 'paper'
+          ? `Paper ${instance.version} build ${instance.software.build}`
+          : `Vanilla Minecraft ${instance.version}`,
+        enabled: false
+      }
     ]
   }))
 
@@ -200,12 +209,19 @@ function registerIpc(): void {
           requiredJavaVersion: versionResult.version.requiredJavaVersion
         }
       : null
+    const paperResult = latestVersion
+      ? await resolveLatestPaperBuild(latestVersion.id)
+          .then((build) => ({ build, error: null }))
+          .catch((error: unknown) => ({ build: null, error: error instanceof Error ? error.message : 'Paper lookup failed.' }))
+      : { build: null, error: 'Paper requires a resolved Minecraft release.' }
     return {
       instances: manager.listViews(),
       settings: store.getSettings(),
       java,
       latestVersion,
       versionLookupError: versionResult.error,
+      latestPaperBuild: paperResult.build,
+      paperLookupError: paperResult.error,
       platform: process.platform,
       appVersion: app.getVersion(),
       totalMemoryMb: Math.round(totalmem() / 1024 / 1024),
@@ -221,6 +237,10 @@ function registerIpc(): void {
   handle(channels.latestVersion, async () => {
     const version = await resolveLatestRelease()
     return { id: version.id, type: 'release', requiredJavaVersion: version.requiredJavaVersion } satisfies LatestVersion
+  })
+  handle(channels.latestPaperBuild, async (_event, minecraftVersion) => {
+    if (typeof minecraftVersion !== 'string') throw new AppError('Invalid Minecraft version.', 'VALIDATION_ERROR')
+    return resolveLatestPaperBuild(minecraftVersion)
   })
   handle(channels.checkJava, async (_event, javaPath) => {
     if (javaPath !== undefined && typeof javaPath !== 'string') throw new AppError('Invalid Java path.', 'VALIDATION_ERROR')
@@ -274,6 +294,42 @@ function registerIpc(): void {
     if (app.isPackaged) app.setLoginItemSettings({ openAtLogin: settings.launchAtLogin })
     return settings
   })
+  handle(channels.getWorldPreparation, (_event, id) => {
+    const parsedId = parseOrThrow(instanceIdSchema.safeParse(id))
+    return worldService.getWorldPreparation(parsedId)
+  })
+  handle(channels.startWorldPreparation, (_event, input) => {
+    assertCanMutate()
+    return worldService.startWorldPreparation(validateWorldPreparationInput(input))
+  })
+  handle(channels.pauseWorldPreparation, (_event, id) => {
+    assertCanMutate()
+    const parsedId = parseOrThrow(instanceIdSchema.safeParse(id))
+    return worldService.pauseWorldPreparation(parsedId)
+  })
+  handle(channels.resumeWorldPreparation, (_event, id) => {
+    assertCanMutate()
+    const parsedId = parseOrThrow(instanceIdSchema.safeParse(id))
+    return worldService.resumeWorldPreparation(parsedId)
+  })
+  handle(channels.cancelWorldPreparation, (_event, id) => {
+    assertCanMutate()
+    const parsedId = parseOrThrow(instanceIdSchema.safeParse(id))
+    return worldService.cancelWorldPreparation(parsedId)
+  })
+  handle(channels.getForceLoadedRegions, (_event, id) => {
+    const parsedId = parseOrThrow(instanceIdSchema.safeParse(id))
+    return worldService.getForceLoadedRegions(parsedId)
+  })
+  handle(channels.addForceLoadedRegion, (_event, input) => {
+    assertCanMutate()
+    return worldService.addForceLoadedRegion(validateForceLoadedRegionInput(input))
+  })
+  handle(channels.removeForceLoadedRegion, (_event, input) => {
+    assertCanMutate()
+    const parsed = parseOrThrow(removeForceLoadedRegionSchema.safeParse(input))
+    return worldService.removeForceLoadedRegion(parsed)
+  })
 }
 
 async function initialize(): Promise<void> {
@@ -282,11 +338,14 @@ async function initialize(): Promise<void> {
   await store.load()
   manager = new ServerManager(store)
   instanceService = new InstanceService(store, manager, dataDirectory)
+  worldService = new WorldService(store, manager)
   manager.onConsole((entry) => mainWindow?.webContents.send(channels.consoleEntry, entry))
   manager.onState((event) => {
     mainWindow?.webContents.send(channels.stateChange, event)
     rebuildTrayMenu()
   })
+  worldService.onWorldPreparationChange((state) => mainWindow?.webContents.send(channels.worldPreparationChange, state))
+  worldService.onForceLoadedRegionsChange((state) => mainWindow?.webContents.send(channels.forceLoadedRegionsChange, state))
   registerIpc()
   createMainWindow()
   createTray()
@@ -299,13 +358,15 @@ app.on('window-all-closed', () => {
 })
 app.on('before-quit', (event) => {
   if (shutdownStarted) return
-  if (manager && instanceService && store) {
+  if (manager && instanceService && worldService && store) {
     event.preventDefault()
     isQuitting = true
     shutdownStarted = true
     manager.beginShutdown()
-    void instanceService.awaitIdle()
+    void worldService.awaitIdle()
+      .then(() => instanceService.awaitIdle())
       .then(() => manager.shutdownAll())
+      .then(() => worldService.awaitIdle())
       .then(() => store.awaitIdle())
       .then(() => app.quit())
       .catch((error: unknown) => {

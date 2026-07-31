@@ -2,6 +2,7 @@ export const channels = {
   getBootstrap: 'app:get-bootstrap',
   refreshInstances: 'instances:list',
   latestVersion: 'minecraft:latest-version',
+  latestPaperBuild: 'paper:latest-build',
   checkJava: 'java:check',
   createInstance: 'instance:create',
   updateInstance: 'instance:update',
@@ -12,7 +13,17 @@ export const channels = {
   openFolder: 'instance:open-folder',
   openEula: 'app:open-eula',
   updateAppSettings: 'app:update-settings',
+  getWorldPreparation: 'world-preparation:get',
+  startWorldPreparation: 'world-preparation:start',
+  pauseWorldPreparation: 'world-preparation:pause',
+  resumeWorldPreparation: 'world-preparation:resume',
+  cancelWorldPreparation: 'world-preparation:cancel',
+  getForceLoadedRegions: 'force-load:get',
+  addForceLoadedRegion: 'force-load:add',
+  removeForceLoadedRegion: 'force-load:remove',
   setupProgress: 'event:setup-progress',
   consoleEntry: 'event:console-entry',
-  stateChange: 'event:state-change'
+  stateChange: 'event:state-change',
+  worldPreparationChange: 'event:world-preparation-change',
+  forceLoadedRegionsChange: 'event:force-loaded-regions-change'
 } as const

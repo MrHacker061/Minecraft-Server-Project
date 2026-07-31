@@ -1,0 +1,9 @@
+[19:10:00 INFO]: [Chunky] Task started in world for the square region centered at 0, 0 with radius 5,000.
+[19:10:01 INFO]: [Chunky] Task running for world. Processed: 1,024 chunks (12.50%), ETA: 1:02:03, Rate: 47.5 cps, Current: -12, 34
+[19:10:02 INFO]: [Chunky] Task paused for world.
+[19:10:02 INFO]: [Chunky] Task stopped for world.
+[19:10:03 INFO]: [Chunky] Task continuing for world.
+[19:10:04 INFO]: [Chunky] Task finished for world. Processed: 8,192 chunks (100.00%), Total time: 2:03:04
+[19:10:05 INFO]: [Chunky] Cancelled tasks cannot be continued. If you are sure you want to cancel, type '/chunky confirm'.
+[19:10:06 INFO]: [Chunky] Task cancelled for world.
+[19:10:07 INFO]: [Chunky] No tasks running.

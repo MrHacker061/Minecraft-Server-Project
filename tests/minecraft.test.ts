@@ -33,7 +33,7 @@ describe('Mojang release resolution', () => {
         id: '26.1',
         type: 'release',
         javaVersion: { majorVersion: 25 },
-        downloads: { server: { url: serverUrl, sha1: 'abc123', size: 42 } }
+        downloads: { server: { url: serverUrl, sha1: 'a'.repeat(40), size: 42 } }
       }))
     vi.stubGlobal('fetch', mockedFetch)
 

@@ -7,7 +7,10 @@ const instance: ServerInstance = {
   name: 'Test server',
   version: '26.2',
   serverDirectory: 'C:\\servers\\test',
+  software: { kind: 'vanilla' },
+  launchArtifact: 'server.jar',
   jarSha1: 'abc',
+  artifactSha256: null,
   requiredJavaVersion: 25,
   javaPath: 'java',
   port: 25565,
@@ -19,6 +22,7 @@ const instance: ServerInstance = {
   onlineMode: true,
   viewDistance: 10,
   simulationDistance: 10,
+  performancePreset: 'balanced',
   eulaAcceptedAt: '2026-07-31T00:00:00.000Z',
   createdAt: '2026-07-31T00:00:00.000Z',
   updatedAt: '2026-07-31T00:00:00.000Z'

@@ -41,7 +41,7 @@ try {
     throw new Error(`Onboarding did not render: ${JSON.stringify({ security, browserMessages })}`)
   }
   await window.getByRole('button', { name: 'Continue' }).click()
-  await window.getByText('Give it room to run').waitFor()
+  await window.getByText('Shape performance').waitFor()
   await window.getByRole('button', { name: 'Continue' }).click()
   await window.getByText('Ready to create').waitFor()
   if (await window.locator('.eula-check input').isChecked()) {

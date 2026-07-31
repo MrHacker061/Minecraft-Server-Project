@@ -4,13 +4,17 @@ import { join } from 'node:path'
 import type {
   CreateInstanceInput,
   InstanceView,
+  PaperBuildInfo,
   ServerInstance,
   SetupProgress,
   UpdateInstanceInput
 } from '../../shared/contracts'
+import { PERFORMANCE_PROFILES } from '../../shared/performance'
+import { downloadChunky, resolveChunkyForPaper, type ResolvedChunkyVersion } from './chunky'
 import { AppError } from './errors'
 import { checkJava } from './java'
 import { downloadServerJar, resolveRelease } from './minecraft'
+import { downloadPaperJar, resolvePaperBuild } from './paper'
 import { createServerProperties, mergeServerProperties } from './properties'
 import type { ServerManager } from './server-manager'
 import type { AppStore } from './store'
@@ -40,8 +44,21 @@ export class InstanceService {
       throw new AppError(`Port ${input.port} is already assigned to another EmberHost server.`, 'PORT_IN_USE')
     }
 
+    const softwareSelection = input.software ?? { kind: 'vanilla' as const }
     onProgress({ phase: 'version', percent: 5, message: `Resolving Minecraft ${input.version}…` })
     const version = await resolveRelease(input.version)
+    let paperBuild: PaperBuildInfo | null = null
+    let chunkyVersion: ResolvedChunkyVersion | null = null
+    if (softwareSelection.kind === 'paper') {
+      onProgress({
+        phase: 'version',
+        percent: 8,
+        message: `Resolving Paper build ${softwareSelection.build} for Minecraft ${version.id}…`
+      })
+      paperBuild = await resolvePaperBuild(version.id, softwareSelection.build)
+      onProgress({ phase: 'plugins', percent: 10, message: `Finding Chunky for Minecraft ${version.id}…` })
+      chunkyVersion = await resolveChunkyForPaper(version.id)
+    }
 
     const selectedJava = input.javaPath || 'java'
     onProgress({ phase: 'java', percent: 12, message: `Checking for Java ${version.requiredJavaVersion}…` })
@@ -62,14 +79,23 @@ export class InstanceService {
     const id = randomUUID()
     const finalDirectory = join(this.serversDirectory, id)
     const stagingDirectory = join(this.serversDirectory, `.${id}.staging`)
-    const artifact = join(this.artifactsDirectory, `${version.download.sha1}.jar`)
+    const launchArtifact = softwareSelection.kind === 'paper' ? 'paper.jar' : 'server.jar'
+    const artifactHash = paperBuild?.download.sha256 ?? version.download.sha1
+    const artifact = join(this.artifactsDirectory, `${artifactHash}.jar`)
     const now = new Date().toISOString()
+    const performancePreset = input.performancePreset ?? (paperBuild ? 'balanced' : 'custom')
+    const profile = performancePreset === 'custom' ? null : PERFORMANCE_PROFILES[performancePreset]
     const instance: ServerInstance = {
       id,
       name: input.name,
       version: version.id,
       serverDirectory: finalDirectory,
-      jarSha1: version.download.sha1,
+      software: paperBuild
+        ? { kind: 'paper', build: paperBuild.build, channel: paperBuild.channel }
+        : { kind: 'vanilla' },
+      launchArtifact,
+      jarSha1: paperBuild ? null : version.download.sha1,
+      artifactSha256: paperBuild?.download.sha256 ?? null,
       requiredJavaVersion: version.requiredJavaVersion,
       javaPath: selectedJava,
       port: input.port,
@@ -79,8 +105,9 @@ export class InstanceService {
       gameMode: 'survival',
       difficulty: 'normal',
       onlineMode: true,
-      viewDistance: 10,
-      simulationDistance: 10,
+      viewDistance: profile?.viewDistance ?? 10,
+      simulationDistance: profile?.simulationDistance ?? 10,
+      performancePreset,
       eulaAcceptedAt: now,
       createdAt: now,
       updatedAt: now
@@ -93,10 +120,27 @@ export class InstanceService {
 
     let promoted = false
     try {
-      await downloadServerJar(version, artifact, onProgress)
+      if (paperBuild) await downloadPaperJar(paperBuild, artifact, onProgress)
+      else await downloadServerJar(version, artifact, onProgress)
+      let chunkyArtifact: string | null = null
+      if (chunkyVersion) {
+        chunkyArtifact = join(this.artifactsDirectory, `chunky-${chunkyVersion.file.sha512}.jar`)
+        onProgress({ phase: 'plugins', percent: 86, message: `Installing Chunky ${chunkyVersion.version}…` })
+        await downloadChunky(chunkyVersion, chunkyArtifact, (received, total) => {
+          onProgress({
+            phase: 'plugins',
+            percent: Math.round(86 + Math.min(received / total, 1) * 3),
+            message: `Downloading Chunky ${chunkyVersion?.version ?? ''}…`,
+            bytesReceived: received,
+            totalBytes: total
+          })
+        })
+        await mkdir(join(stagingDirectory, 'plugins'), { recursive: true })
+        await copyFile(chunkyArtifact, join(stagingDirectory, 'plugins', 'Chunky.jar'))
+      }
       onProgress({ phase: 'files', percent: 90, message: 'Creating your server files…' })
       await Promise.all([
-        copyFile(artifact, join(stagingDirectory, 'server.jar')),
+        copyFile(artifact, join(stagingDirectory, launchArtifact)),
         writeFile(
           join(stagingDirectory, 'eula.txt'),
           `# Accepted through EmberHost on ${now}\n# ${'https://www.minecraft.net/en-us/eula'}\neula=true\n`,
@@ -105,7 +149,17 @@ export class InstanceService {
         writeFile(join(stagingDirectory, 'server.properties'), createServerProperties(instance), 'utf8'),
         writeFile(
           join(stagingDirectory, 'emberhost-instance.json'),
-          `${JSON.stringify({ id, version: version.id, eulaAcceptedAt: now }, null, 2)}\n`,
+          `${JSON.stringify({
+            id,
+            version: version.id,
+            software: instance.software,
+            chunky: chunkyVersion ? {
+              id: chunkyVersion.id,
+              version: chunkyVersion.version,
+              sha512: chunkyVersion.file.sha512
+            } : null,
+            eulaAcceptedAt: now
+          }, null, 2)}\n`,
           'utf8'
         )
       ])

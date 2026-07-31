@@ -14,6 +14,7 @@ import type {
 } from '../../shared/contracts'
 import { AppError } from './errors'
 import { checkJava } from './java'
+import { isMsptHeader, parseMsptValuesLine, parseTpsLine, sampleProcessHealth } from './metrics'
 import type { AppStore } from './store'
 
 interface ManagedProcess {
@@ -27,10 +28,15 @@ interface ManagedProcess {
   logWritable: boolean
   logBackpressured: boolean
   logBytes: number
+  metricsTimer: NodeJS.Timeout | null
+  metricsWindowUntil: number
+  awaitingMsptValues: boolean
+  metricsSampling: boolean
 }
 
 interface ServerManagerDependencies {
   checkJava: typeof checkJava
+  sampleProcessHealth: typeof sampleProcessHealth
   spawnProcess: (
     command: string,
     args: string[],
@@ -52,8 +58,39 @@ const offlineRuntime = (): InstanceRuntime => ({
   startedAt: null,
   lastExitCode: null,
   playerCount: 0,
-  players: []
+  players: [],
+  health: {
+    tps: null,
+    mspt: null,
+    memoryUsedMb: null,
+    memoryMaxMb: null,
+    cpuPercent: null
+  }
 })
+
+export function buildLaunchArguments(instance: ServerInstance): string[] {
+  const maximumPerformance = instance.software.kind === 'paper' && instance.performancePreset === 'maximum-performance'
+  const initialMemory = maximumPerformance
+    ? instance.memoryMb
+    : Math.min(instance.software.kind === 'paper' ? 2048 : 1024, instance.memoryMb)
+  const args = [
+    `-Demberhost.instanceId=${instance.id}`,
+    `-Xms${initialMemory}M`,
+    `-Xmx${instance.memoryMb}M`
+  ]
+  if (instance.software.kind === 'paper') {
+    args.push(
+      '-XX:+UseG1GC',
+      '-XX:+ParallelRefProcEnabled',
+      '-XX:MaxGCPauseMillis=200',
+      '-XX:+DisableExplicitGC',
+      '-XX:+PerfDisableSharedMem'
+    )
+    if (maximumPerformance) args.push('-XX:+AlwaysPreTouch')
+  }
+  args.push('-jar', instance.launchArtifact, 'nogui')
+  return args
+}
 
 export class ServerManager {
   private readonly processes = new Map<string, ManagedProcess>()
@@ -62,6 +99,7 @@ export class ServerManager {
   private readonly consoleListeners = new Set<ConsoleListener>()
   private readonly stateListeners = new Set<StateListener>()
   private readonly operations = new Map<string, Promise<unknown>>()
+  private readonly markerCleanups = new Map<string, Promise<void>>()
   private shuttingDown = false
   private readonly dependencies: ServerManagerDependencies
 
@@ -71,6 +109,7 @@ export class ServerManager {
   ) {
     this.dependencies = {
       checkJava,
+      sampleProcessHealth,
       spawnProcess: (command, args, options) => spawn(command, args, options),
       ...dependencies
     }
@@ -122,6 +161,7 @@ export class ServerManager {
     return this.runExclusive(instanceId, async () => {
       if (this.shuttingDown) throw new AppError('EmberHost is shutting down and cannot start another server.', 'APP_SHUTTING_DOWN')
       const instance = this.requireInstance(instanceId)
+      await this.markerCleanups.get(instanceId)
       if (this.isActive(instanceId)) {
         throw new AppError('This server is already running or changing state.', 'SERVER_BUSY')
       }
@@ -142,30 +182,44 @@ export class ServerManager {
       }
 
       await mkdir(instance.serverDirectory, { recursive: true })
+      if (!/^[A-Za-z0-9._-]+\.jar$/i.test(instance.launchArtifact)) {
+        throw new AppError('The configured server launch artifact is invalid.', 'INVALID_LAUNCH_ARTIFACT')
+      }
       const logPath = join(instance.serverDirectory, 'emberhost-console.log')
       await this.rotateLog(logPath)
-      const args = [
-        `-Demberhost.instanceId=${instance.id}`,
-        `-Xms${Math.min(1024, instance.memoryMb)}M`,
-        `-Xmx${instance.memoryMb}M`,
-        '-jar',
-        'server.jar',
-        'nogui'
-      ]
-      const child = this.dependencies.spawnProcess(instance.javaPath, args, {
-        cwd: instance.serverDirectory,
-        windowsHide: true,
-        shell: false,
-        stdio: ['pipe', 'pipe', 'pipe']
-      })
+      if (await this.probePort(instance.port)) {
+        throw new AppError('Port ' + instance.port + ' is already in use by another process.', 'PORT_IN_USE')
+      }
+      const args = buildLaunchArguments(instance)
+      const startedAt = new Date().toISOString()
+      await this.writeRuntimeMarker(instance, { instanceId, pid: null, startedAt, status: 'launching' })
+      let child: ChildProcessWithoutNullStreams
+      try {
+        child = this.dependencies.spawnProcess(instance.javaPath, args, {
+          cwd: instance.serverDirectory,
+          windowsHide: true,
+          shell: false,
+          stdio: ['pipe', 'pipe', 'pipe']
+        })
+      } catch (error) {
+        await rm(this.runtimeMarkerPath(instance), { force: true })
+        throw error
+      }
 
       const runtime: InstanceRuntime = {
         status: 'starting',
         pid: child.pid ?? null,
-        startedAt: new Date().toISOString(),
+        startedAt,
         lastExitCode: null,
         playerCount: 0,
-        players: []
+        players: [],
+        health: {
+          tps: null,
+          mspt: null,
+          memoryUsedMb: null,
+          memoryMaxMb: instance.memoryMb,
+          cpuPercent: null
+        }
       }
       const logStream = createWriteStream(logPath, { flags: 'a' })
       const readinessTimer = setTimeout(() => {
@@ -194,7 +248,11 @@ export class ServerManager {
         forcedStop: false,
         logWritable: true,
         logBackpressured: false,
-        logBytes: 0
+        logBytes: 0,
+        metricsTimer: null,
+        metricsWindowUntil: 0,
+        awaitingMsptValues: false,
+        metricsSampling: false
       }
       this.processes.set(instanceId, managed)
       this.runtimes.set(instanceId, runtime)
@@ -219,16 +277,14 @@ export class ServerManager {
       })
       child.once('error', (error) => {
         this.emitConsole(instanceId, 'system', `Java process error: ${error.message}`, 'error')
-        this.handleExit(instanceId, managed, null)
+        if (child.pid === undefined || child.exitCode !== null || child.signalCode !== null) {
+          this.handleExit(instanceId, managed, null)
+        }
       })
       child.once('exit', (code) => this.handleExit(instanceId, managed, code))
 
       try {
-        await writeFile(
-          this.runtimeMarkerPath(instance),
-          `${JSON.stringify({ instanceId, pid: child.pid, startedAt: runtime.startedAt }, null, 2)}\n`,
-          'utf8'
-        )
+        await this.writeRuntimeMarker(instance, { instanceId, pid: child.pid, startedAt: runtime.startedAt, status: 'running' })
       } catch (error) {
         try {
           managed.child.kill()
@@ -311,6 +367,7 @@ export class ServerManager {
     await Promise.allSettled([...this.operations.values()])
     const ids = [...this.processes.keys()]
     const results = await Promise.allSettled(ids.map((id) => this.stop(id)))
+    await Promise.allSettled([...this.markerCleanups.values()])
     const failure = results.find((result): result is PromiseRejectedResult => result.status === 'rejected')
     if (failure) throw failure.reason
   }
@@ -333,6 +390,8 @@ export class ServerManager {
   private attachOutput(instanceId: string, managed: ManagedProcess, stream: 'stdout' | 'stderr'): void {
     const reader = createInterface({ input: managed.child[stream], crlfDelay: Infinity })
     reader.on('line', (line) => {
+      if (this.processes.get(instanceId) !== managed) return
+      if (stream === 'stdout' && this.consumeHealthOutput(instanceId, managed, line)) return
       if (managed.logWritable) {
         const persistedLine = `[${new Date().toISOString()}] [${stream}] ${line}\n`
         managed.logBytes += Buffer.byteLength(persistedLine)
@@ -380,6 +439,7 @@ export class ServerManager {
     if (this.processes.get(instanceId) !== managed) return
     clearTimeout(managed.readinessTimer)
     clearInterval(managed.readinessProbe)
+    if (managed.metricsTimer) clearInterval(managed.metricsTimer)
     if (!managed.logStream.destroyed) managed.logStream.end()
     const wasStopping = managed.runtime.status === 'stopping'
     const next: InstanceRuntime = {
@@ -390,7 +450,13 @@ export class ServerManager {
     this.processes.delete(instanceId)
     this.runtimes.set(instanceId, next)
     const instance = this.store.getInstance(instanceId)
-    if (instance) void rm(this.runtimeMarkerPath(instance), { force: true }).catch(() => undefined)
+    if (instance) {
+      const cleanup = rm(this.runtimeMarkerPath(instance), { force: true }).catch(() => undefined)
+      this.markerCleanups.set(instanceId, cleanup)
+      void cleanup.finally(() => {
+        if (this.markerCleanups.get(instanceId) === cleanup) this.markerCleanups.delete(instanceId)
+      })
+    }
     this.emitState(instanceId, next)
     this.emitConsole(
       instanceId,
@@ -417,10 +483,62 @@ export class ServerManager {
   }
 
   private confirmReady(instanceId: string, managed: ManagedProcess): void {
+    if (this.processes.get(instanceId) !== managed || managed.runtime.status !== 'starting') return
     clearTimeout(managed.readinessTimer)
     clearInterval(managed.readinessProbe)
     managed.runtime.status = 'online'
+    const instance = this.store.getInstance(instanceId)
+    if (instance && !managed.metricsTimer) {
+      managed.metricsTimer = setInterval(() => this.collectHealth(instanceId, managed, instance), 10_000)
+    }
     this.emitState(instanceId, managed.runtime)
+  }
+
+  private consumeHealthOutput(instanceId: string, managed: ManagedProcess, line: string): boolean {
+    if (Date.now() > managed.metricsWindowUntil) {
+      managed.awaitingMsptValues = false
+      return false
+    }
+    const tps = parseTpsLine(line)
+    if (tps !== null) {
+      managed.runtime.health.tps = tps
+      this.emitState(instanceId, managed.runtime)
+      return true
+    }
+    if (isMsptHeader(line)) {
+      managed.awaitingMsptValues = true
+      return true
+    }
+    if (managed.awaitingMsptValues) {
+      const mspt = parseMsptValuesLine(line)
+      if (mspt !== null) {
+        managed.awaitingMsptValues = false
+        managed.runtime.health.mspt = mspt
+        this.emitState(instanceId, managed.runtime)
+        return true
+      }
+    }
+    return false
+  }
+
+  private collectHealth(instanceId: string, managed: ManagedProcess, instance: ServerInstance): void {
+    if (this.processes.get(instanceId) !== managed || managed.runtime.status !== 'online') return
+    if (instance.software.kind === 'paper') {
+      managed.metricsWindowUntil = Date.now() + 5_000
+      this.writeInput(instanceId, managed, 'tps\n')
+      this.writeInput(instanceId, managed, 'mspt\n')
+    }
+    if (managed.metricsSampling || managed.runtime.pid === null) return
+    managed.metricsSampling = true
+    void this.dependencies.sampleProcessHealth(managed.runtime.pid).then((sample) => {
+      if (this.processes.get(instanceId) !== managed) return
+      managed.runtime.health.cpuPercent = sample.cpuPercent
+      managed.runtime.health.memoryUsedMb = sample.memoryUsedMb
+      managed.runtime.health.memoryMaxMb = instance.memoryMb
+      this.emitState(instanceId, managed.runtime)
+    }).finally(() => {
+      managed.metricsSampling = false
+    })
   }
 
   private probePort(port: number): Promise<boolean> {
@@ -443,13 +561,36 @@ export class ServerManager {
     return join(instance.serverDirectory, '.emberhost-runtime.json')
   }
 
+  private async writeRuntimeMarker(instance: ServerInstance, marker: Record<string, unknown>): Promise<void> {
+    const markerPath = this.runtimeMarkerPath(instance)
+    const temporaryPath = markerPath + '.tmp'
+    try {
+      await writeFile(temporaryPath, `${JSON.stringify(marker, null, 2)}\n`, 'utf8')
+      await rename(temporaryPath, markerPath)
+    } finally {
+      await rm(temporaryPath, { force: true })
+    }
+  }
+
   private async assertNoOrphan(instance: ServerInstance): Promise<void> {
     const markerPath = this.runtimeMarkerPath(instance)
     try {
-      const marker = JSON.parse(await readFile(markerPath, 'utf8')) as { instanceId?: unknown; pid?: unknown }
-      if (marker.instanceId !== instance.id || typeof marker.pid !== 'number' || !Number.isInteger(marker.pid)) {
-        await rm(markerPath, { force: true })
-        return
+      const marker = JSON.parse(await readFile(markerPath, 'utf8')) as {
+        instanceId?: unknown
+        pid?: unknown
+        status?: unknown
+      }
+      if (marker.instanceId !== instance.id) {
+        throw new AppError('The server has an invalid runtime ownership marker. Inspect running Java processes before removing it.', 'INVALID_RUNTIME_MARKER')
+      }
+      if (typeof marker.pid !== 'number' || !Number.isInteger(marker.pid)) {
+        if (marker.status === 'launching') {
+          throw new AppError(
+            'An earlier EmberHost launch was interrupted before Java ownership could be confirmed. Inspect running Java processes before removing .emberhost-runtime.json.',
+            'INCOMPLETE_RUNTIME_MARKER'
+          )
+        }
+        throw new AppError('The server has an invalid runtime ownership marker. Inspect running Java processes before removing it.', 'INVALID_RUNTIME_MARKER')
       }
       try {
         process.kill(marker.pid, 0)
@@ -468,8 +609,10 @@ export class ServerManager {
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return
       if (error instanceof SyntaxError) {
-        await rm(markerPath, { force: true })
-        return
+        throw new AppError(
+          'The server runtime marker is unreadable. Inspect running Java processes before removing .emberhost-runtime.json.',
+          'INVALID_RUNTIME_MARKER'
+        )
       }
       throw error
     }
@@ -508,7 +651,7 @@ export class ServerManager {
   }
 
   private cloneRuntime(runtime: InstanceRuntime): InstanceRuntime {
-    return { ...runtime, players: [...runtime.players] }
+    return { ...runtime, players: [...runtime.players], health: { ...runtime.health } }
   }
 
   private serialize<T>(instanceId: string, operation: () => Promise<T>): Promise<T> {

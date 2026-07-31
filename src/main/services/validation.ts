@@ -8,6 +8,11 @@ const serverName = z
   .regex(/^[^<>:"/\\|?*\u0000-\u001f]+$/, 'The name contains a character that cannot be used in a folder name.')
 
 const javaPath = z.string().trim().min(1).max(500)
+const performancePreset = z.enum(['balanced', 'far-view', 'maximum-performance', 'custom'])
+const serverSoftware = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('vanilla') }),
+  z.object({ kind: z.literal('paper'), build: z.number().int().positive() })
+])
 
 export const instanceIdSchema = z.string().uuid()
 
@@ -19,6 +24,8 @@ export const createInstanceSchema = z.object({
   maxPlayers: z.number().int().min(1).max(1000),
   motd: z.string().trim().min(1).max(120),
   javaPath: javaPath.optional(),
+  software: serverSoftware.optional(),
+  performancePreset: performancePreset.optional(),
   eulaAccepted: z.literal(true)
 })
 
@@ -34,7 +41,16 @@ export const updateInstanceSchema = z.object({
   onlineMode: z.boolean(),
   viewDistance: z.number().int().min(2).max(32),
   simulationDistance: z.number().int().min(2).max(32),
+  performancePreset,
   javaPath
+}).refine((value) => value.simulationDistance <= value.viewDistance, {
+  message: 'Simulation distance cannot exceed view distance.',
+  path: ['simulationDistance']
+})
+
+export const removeForceLoadedRegionSchema = z.object({
+  instanceId: instanceIdSchema,
+  regionId: instanceIdSchema
 })
 
 export const commandSchema = z.object({

@@ -36,7 +36,10 @@ describe('ServerManager', () => {
       name: 'Fake world',
       version: '26.2',
       serverDirectory,
-      jarSha1: 'abc',
+      software: { kind: 'paper', build: 87, channel: 'STABLE' },
+      launchArtifact: 'paper.jar',
+      jarSha1: null,
+      artifactSha256: 'a'.repeat(64),
       requiredJavaVersion: 25,
       javaPath: 'java',
       port: 25565,
@@ -48,6 +51,7 @@ describe('ServerManager', () => {
       onlineMode: true,
       viewDistance: 10,
       simulationDistance: 10,
+      performancePreset: 'balanced',
       eulaAcceptedAt: '2026-07-31T00:00:00.000Z',
       createdAt: '2026-07-31T00:00:00.000Z',
       updatedAt: '2026-07-31T00:00:00.000Z'
@@ -79,7 +83,7 @@ describe('ServerManager', () => {
     await manager.start(instance.id)
     expect((await online).runtime.status).toBe('online')
     expect(capturedArgs).toContain('-Xmx4096M')
-    expect(capturedArgs.slice(-2)).toEqual(['server.jar', 'nogui'])
+    expect(capturedArgs.slice(-2)).toEqual(['paper.jar', 'nogui'])
     expect(capturedShell).toBe(false)
 
     const commandOutput = waitFor<ConsoleEntry>((resolveEntry) => {
