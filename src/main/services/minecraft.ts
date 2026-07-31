@@ -63,7 +63,7 @@ async function fetchJson<T>(url: string, schema: z.ZodType<T>): Promise<T> {
   let response: Response
   try {
     response = await fetch(url, {
-      headers: { 'User-Agent': 'EmberHost/0.4.0' },
+      headers: { 'User-Agent': 'EmberHost/0.4.1' },
       redirect: 'error',
       signal: AbortSignal.timeout(20_000)
     })
@@ -188,7 +188,7 @@ export async function downloadServerJar(
   let response: Response
   try {
     response = await fetch(version.download.url, {
-      headers: { 'User-Agent': 'EmberHost/0.4.0' },
+      headers: { 'User-Agent': 'EmberHost/0.4.1' },
       redirect: 'error',
       signal: AbortSignal.timeout(120_000)
     })

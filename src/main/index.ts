@@ -1,5 +1,5 @@
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, shell, Tray, type IpcMainInvokeEvent } from 'electron'
-import { cpus, homedir, networkInterfaces, totalmem } from 'node:os'
+import { cpus, homedir, totalmem } from 'node:os'
 import { basename, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { channels } from '../shared/channels'
@@ -9,6 +9,7 @@ import { InstanceService } from './services/instance-service'
 import { checkJava } from './services/java'
 import { listOfficialReleases, resolveLatestRelease, resolveRelease } from './services/minecraft'
 import { resolveLatestPaperBuild } from './services/paper'
+import { getLanAddresses } from './services/network'
 import { catalogPluginPageUrl, PluginCatalogService } from './services/plugin-catalog'
 import { PluginService } from './services/plugin-service'
 import { ServerManager } from './services/server-manager'
@@ -234,14 +235,12 @@ function registerIpc(): void {
       platform: process.platform,
       appVersion: app.getVersion(),
       totalMemoryMb: Math.round(totalmem() / 1024 / 1024),
-      lanAddresses: Object.values(networkInterfaces())
-        .flatMap((addresses) => addresses ?? [])
-        .filter((address) => address.family === 'IPv4' && !address.internal)
-        .map((address) => address.address),
+      lanAddresses: getLanAddresses(),
       cpuCount: cpus().length
     }
   })
 
+  handle(channels.getLanAddresses, () => getLanAddresses())
   handle(channels.refreshInstances, () => manager.listViews())
   handle(channels.latestVersion, async () => {
     const version = await resolveLatestRelease()

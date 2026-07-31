@@ -1,4 +1,5 @@
 import { access, mkdir, readdir, rm, writeFile } from 'node:fs/promises'
+import { networkInterfaces } from 'node:os'
 import { resolve } from 'node:path'
 import { _electron as electron } from 'playwright-core'
 
@@ -92,6 +93,31 @@ try {
   await window.waitForLoadState('domcontentloaded')
   await window.locator('.hero-card').waitFor({ timeout: 30_000 })
   await window.locator('.topbar h1').getByText('Cedar Valley', { exact: true }).waitFor()
+  const addressPill = window.locator('.address-pill')
+  const assignedAddresses = Object.values(networkInterfaces())
+    .flatMap((addresses) => addresses ?? [])
+    .filter((address) => {
+      if (address.family !== 'IPv4' || address.internal) return false
+      const [first, second] = address.address.split('.').map(Number)
+      return first !== 0 && first !== 127 && first < 224 && !(first === 169 && second === 254)
+    })
+    .map((address) => address.address)
+  await window.waitForFunction(({ addresses, port }) => {
+    const displayed = document.querySelector('.address-pill')?.getAttribute('data-address')
+    return addresses.length ? addresses.some((address) => displayed === `${address}:${port}`) : displayed === `localhost:${port}`
+  }, { addresses: assignedAddresses, port: 25565 }, { timeout: 7_000 })
+  const initialAddress = await addressPill.getAttribute('data-address')
+  if (!initialAddress?.endsWith(':25565')) throw new Error(`Overview showed the wrong Vanilla port: ${initialAddress}`)
+  await window.evaluate(() => {
+    Object.defineProperty(navigator.clipboard, 'writeText', {
+      configurable: true,
+      value: async (value) => { window.__emberHostSmokeCopiedAddress = value }
+    })
+  })
+  await window.getByRole('button', { name: 'Copy server address' }).click()
+  await window.getByText('Server address copied.', { exact: true }).waitFor()
+  const copiedAddress = await window.evaluate(() => window.__emberHostSmokeCopiedAddress)
+  if (copiedAddress !== initialAddress) throw new Error(`Copied address diverged from the display: ${copiedAddress}`)
   if (browserMessages.length) throw new Error(`Dashboard renderer errors: ${JSON.stringify(browserMessages)}`)
   await window.screenshot({ path: resolve(artifacts, 'dashboard.png') })
   await window.locator('nav').getByRole('button', { name: 'World tools', exact: true }).click()
@@ -130,6 +156,8 @@ try {
   await window.screenshot({ path: resolve(artifacts, 'paper-world-tools.png') })
   await window.getByRole('button', { name: 'Overview', exact: true }).click()
   await window.getByLabel('Paper server health').waitFor()
+  const paperAddress = await window.locator('.address-pill').getAttribute('data-address')
+  if (!paperAddress?.endsWith(':25566')) throw new Error(`Overview did not update the selected server port: ${paperAddress}`)
   await window.screenshot({ path: resolve(artifacts, 'paper-dashboard.png') })
   await window.getByRole('button', { name: 'Console', exact: true }).click()
   await window.getByText('Paper Ridge console').waitFor()

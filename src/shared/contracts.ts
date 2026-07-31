@@ -237,6 +237,7 @@ export interface StateEvent {
 
 export interface EmberHostApi {
   getBootstrap: () => Promise<BootstrapData>
+  getLanAddresses: () => Promise<string[]>
   refreshInstances: () => Promise<InstanceView[]>
   getLatestVersion: () => Promise<LatestVersion>
   getMinecraftReleases: () => Promise<MinecraftReleaseInfo[]>

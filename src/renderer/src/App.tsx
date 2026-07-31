@@ -456,14 +456,18 @@ function healthTone(value: number | null, healthy: number, warning: number, lowe
   return value >= healthy ? 'green' : value >= warning ? 'amber' : 'red'
 }
 
-function Overview({ instance, address, logs, now, busy, onStartStop, onOpenFolder, onCopy, onConsole, onWorld }: {
+function Overview({ instance, address, addressHost, lanAddresses, localOnly, logs, now, busy, onStartStop, onOpenFolder, onAddressChange, onCopy, onConsole, onWorld }: {
   instance: InstanceView
   address: string
+  addressHost: string
+  lanAddresses: string[]
+  localOnly: boolean
   logs: ConsoleEntry[]
   now: number
   busy: boolean
   onStartStop: () => void
   onOpenFolder: () => void
+  onAddressChange: (address: string) => void
   onCopy: () => void
   onConsole: () => void
   onWorld: () => void
@@ -475,6 +479,15 @@ function Overview({ instance, address, logs, now, busy, onStartStop, onOpenFolde
   const memoryUsed = health.memoryUsedMb
   const memoryMax = health.memoryMaxMb ?? instance.memoryMb
   const memoryPercent = memoryUsed === null || memoryMax <= 0 ? null : memoryUsed / memoryMax * 100
+  const connectionDescription = instance.runtime.status === 'online'
+    ? localOnly
+      ? 'No usable IPv4 LAN address was detected. This address works only on this computer.'
+      : 'Players on your network can connect with this address.'
+    : instance.runtime.status === 'starting'
+      ? 'Minecraft is loading the world and preparing the network.'
+      : stopping
+        ? 'Minecraft is saving the world before the Java process exits.'
+        : 'Start the server to make this world available on your computer and local network.'
   return (
     <div className="page-content">
       <section className={`hero-card hero-${instance.runtime.status}`}>
@@ -482,8 +495,14 @@ function Overview({ instance, address, logs, now, busy, onStartStop, onOpenFolde
         <div className="hero-main">
           <div className="hero-badges"><StatusBadge status={instance.runtime.status} large /><span className={`software-badge ${paper ? 'paper' : 'vanilla'}`}>{paper ? <Rocket size={13} /> : <Server size={13} />}{paper ? `Paper build ${instance.software.kind === 'paper' ? instance.software.build : ''}` : 'Vanilla'}</span></div>
           <h2>{instance.runtime.status === 'online' ? 'Your world is live.' : instance.runtime.status === 'starting' ? 'Warming up your world…' : stopping ? 'Saving and stopping…' : instance.runtime.status === 'crashed' ? 'The last run needs attention.' : 'Ready when you are.'}</h2>
-          <p>{instance.runtime.status === 'online' ? 'Players on your network can connect with this address.' : instance.runtime.status === 'starting' ? 'Minecraft is loading the world and preparing the network.' : stopping ? 'Minecraft is saving the world before the Java process exits.' : 'Start the server to make this world available on your computer and local network.'}</p>
-          <button className="address-pill" onClick={onCopy} title="Copy address"><Network size={16} /><span>{address}</span><Copy size={14} /></button>
+          <p>{connectionDescription}</p>
+          <div className="address-pill" data-address={address} title={lanAddresses.length > 1 ? 'Choose a current network address' : 'Current network address'}>
+            <Network size={16} />
+            {lanAddresses.length > 1
+              ? <select aria-label="Network address" value={addressHost} onChange={(event) => onAddressChange(event.target.value)}>{lanAddresses.map((lanAddress) => <option key={lanAddress} value={lanAddress}>{lanAddress}:{instance.port}</option>)}</select>
+              : <span>{address}</span>}
+            <button type="button" className="address-copy" aria-label="Copy server address" title="Copy server address" onClick={onCopy}><Copy size={14} /></button>
+          </div>
         </div>
         <div className="hero-stats">
           <div><span>Uptime</span><strong>{instance.runtime.status === 'online' ? formatUptime(instance.runtime.startedAt, now) : '—'}</strong></div>
@@ -1012,6 +1031,8 @@ function DeleteServerDialog({ instance, deleting, onCancel, onConfirm }: {
 
 export default function App(): React.JSX.Element {
   const [bootstrap, setBootstrap] = useState<BootstrapData | null>(null)
+  const [lanAddresses, setLanAddresses] = useState<string[]>([])
+  const [selectedLanAddress, setSelectedLanAddress] = useState<string | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [instances, setInstances] = useState<InstanceView[]>([])
   const [selectedId, setSelectedId] = useState<string | null>(null)
@@ -1040,6 +1061,8 @@ export default function App(): React.JSX.Element {
   const [appSettings, setAppSettings] = useState<AppSettings>({ launchAtLogin: false, minimizeToTray: true })
   const pluginListRequest = useRef<Record<string, number>>({})
   const pluginCatalogRequest = useRef<Record<string, number>>({})
+  const lanAddressRequest = useRef(0)
+  const lanAddressResolved = useRef(false)
 
   const selected = useMemo(() => instances.find((instance) => instance.id === selectedId) ?? instances[0] ?? null, [instances, selectedId])
   const selectedLogs = selected ? logs[selected.id] ?? [] : []
@@ -1047,6 +1070,8 @@ export default function App(): React.JSX.Element {
   const selectedForceLoads = selected ? forceLoadedRegions[selected.id] ?? emptyForceLoadedRegions(selected.id) : null
   const selectedPlugins = selected ? paperPlugins[selected.id] ?? [] : []
   const selectedPluginCatalog = selected ? paperPluginCatalogs[selected.id] ?? [] : []
+  const selectedAddressHost = selectedLanAddress ?? lanAddresses[0] ?? 'localhost'
+  const selectedServerAddress = selected ? `${selectedAddressHost}:${selected.port}` : ''
   const pluginLoading = selected ? pluginLoadingByInstance[selected.id] === true : false
   const catalogLoading = selected ? catalogLoadingByInstance[selected.id] === true : false
   const selectedActive = selected?.runtime.status === 'online' || selected?.runtime.status === 'starting'
@@ -1089,6 +1114,10 @@ export default function App(): React.JSX.Element {
       setSelectedId(data.instances[0]?.id ?? null)
       setAppSettings(data.settings)
       setShowCreate(data.instances.length === 0)
+      if (!lanAddressResolved.current) {
+        setLanAddresses(data.lanAddresses)
+        setSelectedLanAddress((current) => current && data.lanAddresses.includes(current) ? current : data.lanAddresses[0] ?? null)
+      }
     }).catch((error) => setLoadError(friendlyError(error)))
 
     const removeProgress = window.emberHost.onSetupProgress(setCreateProgress)
@@ -1102,6 +1131,37 @@ export default function App(): React.JSX.Element {
     const removeForceLoads = paperApi.onForceLoadedRegionsChange((state) => setForceLoadedRegions((current) => ({ ...current, [state.instanceId]: state })))
     const timer = window.setInterval(() => setNow(Date.now()), 1000)
     return () => { removeProgress(); removeConsole(); removeState(); removePreparation(); removeForceLoads(); window.clearInterval(timer) }
+  }, [])
+
+  useEffect(() => {
+    let active = true
+    const refresh = (): void => {
+      const request = ++lanAddressRequest.current
+      void window.emberHost.getLanAddresses().then((addresses) => {
+        if (active && request === lanAddressRequest.current) {
+          lanAddressResolved.current = true
+          setLanAddresses(addresses)
+          setSelectedLanAddress((current) => current && addresses.includes(current) ? current : addresses[0] ?? null)
+        }
+      }).catch(() => undefined)
+    }
+    const refreshWhenVisible = (): void => {
+      if (document.visibilityState === 'visible') refresh()
+    }
+
+    refresh()
+    const timer = window.setInterval(refresh, 5_000)
+    window.addEventListener('focus', refresh)
+    window.addEventListener('online', refresh)
+    document.addEventListener('visibilitychange', refreshWhenVisible)
+    return () => {
+      active = false
+      lanAddressRequest.current += 1
+      window.clearInterval(timer)
+      window.removeEventListener('focus', refresh)
+      window.removeEventListener('online', refresh)
+      document.removeEventListener('visibilitychange', refreshWhenVisible)
+    }
   }, [])
 
   useEffect(() => {
@@ -1460,7 +1520,7 @@ export default function App(): React.JSX.Element {
         </header>
 
         {selected ? (
-          view === 'overview' ? <Overview instance={selected} address={`${bootstrap.lanAddresses[0] ?? 'localhost'}:${selected.port}`} logs={selectedLogs} now={now} busy={busy} onStartStop={() => void startStop()} onOpenFolder={() => void window.emberHost.openServerFolder(selected.id).catch((error) => toast('error', friendlyError(error)))} onCopy={() => { void navigator.clipboard.writeText(`${bootstrap.lanAddresses[0] ?? 'localhost'}:${selected.port}`).then(() => toast('info', 'Server address copied.')).catch((error) => toast('error', friendlyError(error))) }} onConsole={() => setView('console')} onWorld={() => setView('world')} />
+          view === 'overview' ? <Overview instance={selected} address={selectedServerAddress} addressHost={selectedAddressHost} lanAddresses={lanAddresses} localOnly={!lanAddresses.length} logs={selectedLogs} now={now} busy={busy} onStartStop={() => void startStop()} onOpenFolder={() => void window.emberHost.openServerFolder(selected.id).catch((error) => toast('error', friendlyError(error)))} onAddressChange={setSelectedLanAddress} onCopy={() => { void navigator.clipboard.writeText(selectedServerAddress).then(() => toast('info', 'Server address copied.')).catch((error) => toast('error', friendlyError(error))) }} onConsole={() => setView('console')} onWorld={() => setView('world')} />
              : view === 'world' && selectedPreparation && selectedForceLoads ? <WorldToolsView key={selected.id} instance={selected} preparation={selectedPreparation} forceLoads={selectedForceLoads} busy={worldBusy} onStartPreparation={startWorldPreparation} onPausePreparation={pauseWorldPreparation} onResumePreparation={resumeWorldPreparation} onCancelPreparation={cancelWorldPreparation} onAddForceLoad={addForceLoadedRegion} onRemoveForceLoad={removeForceLoadedRegion} onCreatePaper={openCreate} />
                : view === 'plugins' ? <PluginsView key={selected.id} instance={selected} plugins={selectedPlugins} catalog={selectedPluginCatalog} loading={pluginLoading} catalogLoading={catalogLoading} busy={pluginBusy || pluginLoading || catalogLoading} installingProjectId={catalogInstall?.instanceId === selected.id ? catalogInstall.projectId : null} onInstall={() => void installPaperPlugin()} onInstallCatalog={(projectId) => void installCatalogPaperPlugin(projectId)} onOpenCatalogSource={openPaperPluginSource} onRemove={(fileName) => void removePaperPlugin(fileName)} onRefresh={() => void refreshPaperPlugins()} onRefreshCatalog={() => void refreshPaperPluginCatalog()} onCreatePaper={openCreate} />
                : view === 'console' ? <ConsoleView key={selected.id} instance={selected} logs={selectedLogs} onSend={sendCommand} />

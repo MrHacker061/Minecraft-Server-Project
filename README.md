@@ -15,6 +15,7 @@ EmberHost is a desktop control panel for turning a personal computer into a self
 - Resolves Minecraft's required Java major version instead of hardcoding it.
 - Requires explicit Minecraft EULA acceptance before writing eula=true.
 - Offers Balanced, Far View, and Maximum Performance profiles.
+- Refreshes and prioritizes active LAN addresses when your computer changes networks.
 - Uses safe G1GC launch flags for Paper and a larger initial heap only in the maximum-performance profile.
 - Shows live Paper TPS, MSPT, process memory, CPU use, player count, and uptime.
 - Pre-generates selected dimensions with Chunky from a configurable 256–20,000 block radius.

@@ -20,6 +20,7 @@ import type {
 
 const api: EmberHostApi = {
   getBootstrap: () => ipcRenderer.invoke(channels.getBootstrap),
+  getLanAddresses: () => ipcRenderer.invoke(channels.getLanAddresses),
   refreshInstances: () => ipcRenderer.invoke(channels.refreshInstances),
   getLatestVersion: () => ipcRenderer.invoke(channels.latestVersion),
   getMinecraftReleases: () => ipcRenderer.invoke(channels.minecraftReleases),

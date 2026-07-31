@@ -1,5 +1,6 @@
 export const channels = {
   getBootstrap: 'app:get-bootstrap',
+  getLanAddresses: 'app:get-lan-addresses',
   refreshInstances: 'instances:list',
   latestVersion: 'minecraft:latest-version',
   minecraftReleases: 'minecraft:releases',

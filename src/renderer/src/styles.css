@@ -264,6 +264,10 @@ button:disabled { cursor: not-allowed; opacity: .5; }
 .hero-main > p { max-width: 590px; margin: 0; color: var(--text-secondary); line-height: 1.6; }
 .address-pill { display: inline-flex; align-items: center; gap: 8px; height: 35px; margin-top: 22px; padding: 0 11px; border: 1px solid rgba(88, 200, 120, .18); border-radius: 7px; color: #bde8c8; background: rgba(88, 200, 120, .07); }
 .address-pill span { font: 12px/1 ui-monospace, SFMono-Regular, Consolas, monospace; }
+.address-pill select { max-width: 260px; border: 0; outline: 0; color: inherit; background: transparent; font: 12px/1 ui-monospace, SFMono-Regular, Consolas, monospace; cursor: pointer; }
+.address-pill select option { color: var(--text-primary); background: var(--surface); }
+.address-copy { display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; padding: 0; border: 0; border-radius: 5px; color: inherit; background: transparent; cursor: pointer; }
+.address-copy:hover { background: rgba(255, 255, 255, .08); }
 .address-pill:hover { background: rgba(88, 200, 120, .12); }
 .hero-stats { display: grid; grid-template-rows: repeat(3, 1fr); position: relative; z-index: 1; border-left: 1px solid var(--border-soft); background: rgba(12, 17, 23, .28); }
 .hero-stats > div { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 0 28px; border-bottom: 1px solid var(--border-soft); }
