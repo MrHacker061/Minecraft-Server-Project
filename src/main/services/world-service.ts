@@ -363,6 +363,24 @@ export class WorldService {
     }
   }
 
+  async runBackupOperation<T>(instanceId: string, operation: () => Promise<T>): Promise<T> {
+    const id = instanceIdSchema.parse(instanceId)
+    return this.serialize(id, async () => {
+      const instance = this.store.getInstance(id)
+      if (!instance) throw new AppError('That server no longer exists.', 'INSTANCE_NOT_FOUND')
+      if (instance.software.kind === 'paper') {
+        const state = await this.load(id)
+        if (state.preparation.status === 'running' || state.preparation.status === 'paused') {
+          throw new AppError(
+            'Cancel the active or paused world-preparation task before creating an automatic backup.',
+            'WORLD_PREPARATION_BUSY'
+          )
+        }
+      }
+      return operation()
+    })
+  }
+
   async getWorldPreparation(instanceId: string): Promise<WorldPreparationState> {
     const id = instanceIdSchema.parse(instanceId)
     return this.serialize(id, async () => {

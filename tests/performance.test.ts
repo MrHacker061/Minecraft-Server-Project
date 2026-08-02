@@ -275,6 +275,12 @@ describe('world preparation validation and lifecycle', () => {
     const { service, manager } = await harness()
     await service.startWorldPreparation({ instanceId: INSTANCE_ID, radius: 256, dimensions: ['overworld'] })
 
+    let backupRan = false
+    await expect(service.runBackupOperation(INSTANCE_ID, async () => {
+      backupRan = true
+    })).rejects.toMatchObject({ code: 'WORLD_PREPARATION_BUSY' })
+    expect(backupRan).toBe(false)
+
     await expect(service.beginWorldRegeneration(INSTANCE_ID)).rejects.toMatchObject({
       code: 'WORLD_PREPARATION_BUSY'
     })
@@ -290,6 +296,10 @@ describe('world preparation validation and lifecycle', () => {
     await expect(service.beginWorldRegeneration(INSTANCE_ID)).rejects.toMatchObject({
       code: 'WORLD_PREPARATION_BUSY'
     })
+    await expect(service.runBackupOperation(INSTANCE_ID, async () => {
+      backupRan = true
+    })).rejects.toMatchObject({ code: 'WORLD_PREPARATION_BUSY' })
+    expect(backupRan).toBe(false)
     await expect(service.getWorldPreparation(INSTANCE_ID)).resolves.toMatchObject({ status: 'paused' })
   })
 

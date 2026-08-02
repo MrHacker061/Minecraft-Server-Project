@@ -48,6 +48,9 @@ import {
 import { FormEvent, useEffect, useMemo, useRef, useState } from 'react'
 import type {
   AppSettings,
+  BackupIntervalHours,
+  BackupRetentionCount,
+  BackupState,
   BootstrapData,
   CatalogPaperPlugin,
   CatalogPluginInstallInput,
@@ -63,6 +66,7 @@ import type {
   ServerSoftwareSelection,
   ServerStatus,
   SetupProgress,
+  UpdateBackupPolicyInput,
   UpdateInstanceInput,
   WorldDimension,
   WorldPreparationState
@@ -81,6 +85,14 @@ type PaperCreateInput = CreateInstanceInput & {
 type PaperApi = typeof window.emberHost
 
 const presetIds: Array<Exclude<PerformancePreset, 'custom'>> = ['balanced', 'far-view', 'maximum-performance']
+const backupIntervalOptions: Array<{ value: BackupIntervalHours; label: string }> = [
+  { value: 1, label: 'Every hour' },
+  { value: 3, label: 'Every 3 hours' },
+  { value: 6, label: 'Every 6 hours' },
+  { value: 12, label: 'Every 12 hours' },
+  { value: 24, label: 'Every 24 hours' }
+]
+const backupRetentionOptions: BackupRetentionCount[] = [1, 3, 5, 7, 14]
 
 const presetOptions: Array<{
   id: Exclude<PerformancePreset, 'custom'>
@@ -138,6 +150,19 @@ function friendlyError(error: unknown): string {
 function formatBytes(value: number): string {
   if (value < 1024 * 1024) return `${Math.max(1, Math.round(value / 1024))} KB`
   return `${(value / 1024 / 1024).toFixed(1)} MB`
+}
+
+function formatBackupBytes(value: number): string {
+  if (value <= 0) return '0 B'
+  if (value >= 1024 * 1024 * 1024) return `${(value / 1024 / 1024 / 1024).toFixed(1)} GB`
+  return formatBytes(value)
+}
+
+function formatBackupTime(value: string | null): string {
+  if (!value) return 'Not yet'
+  const parsed = new Date(value)
+  if (Number.isNaN(parsed.getTime())) return 'Unavailable'
+  return parsed.toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })
 }
 
 function categoryLabel(value: string): string {
@@ -470,8 +495,9 @@ function healthTone(value: number | null, healthy: number, warning: number, lowe
   return value >= healthy ? 'green' : value >= warning ? 'amber' : 'red'
 }
 
-function Overview({ instance, address, addressHost, lanAddresses, localOnly, logs, now, busy, onStartStop, onOpenFolder, onAddressChange, onCopy, onConsole, onWorld }: {
+function Overview({ instance, backupState, address, addressHost, lanAddresses, localOnly, logs, now, busy, onStartStop, onOpenFolder, onAddressChange, onCopy, onConsole, onWorld, onBackups }: {
   instance: InstanceView
+  backupState: BackupState | null
   address: string
   addressHost: string
   lanAddresses: string[]
@@ -485,6 +511,7 @@ function Overview({ instance, address, addressHost, lanAddresses, localOnly, log
   onCopy: () => void
   onConsole: () => void
   onWorld: () => void
+  onBackups: () => void
 }): React.JSX.Element {
   const active = instance.runtime.status === 'online' || instance.runtime.status === 'starting'
   const stopping = instance.runtime.status === 'stopping'
@@ -493,6 +520,18 @@ function Overview({ instance, address, addressHost, lanAddresses, localOnly, log
   const memoryUsed = health.memoryUsedMb
   const memoryMax = health.memoryMaxMb ?? instance.memoryMb
   const memoryPercent = memoryUsed === null || memoryMax <= 0 ? null : memoryUsed / memoryMax * 100
+  const backupOverdue = Boolean(backupState?.policy.enabled && backupState.nextBackupAt && new Date(backupState.nextBackupAt).getTime() <= now)
+  const showBackupNotice = Boolean(backupState && (
+    backupState.status === 'failed' ||
+    backupState.status === 'running' ||
+    (backupState.policy.enabled && (backupState.status === 'waiting' || backupOverdue))
+  ))
+  const backupNoticeTone = backupState?.status === 'failed' ? 'failed' : backupState?.status === 'running' ? 'running' : 'waiting'
+  const backupNoticeTitle = backupState?.status === 'failed'
+    ? 'Automatic backup needs attention'
+    : backupState?.status === 'running'
+      ? 'World backup in progress'
+      : 'Automatic backup is waiting'
   const connectionDescription = instance.runtime.status === 'online'
     ? localOnly
       ? 'No usable IPv4 LAN address was detected. This address works only on this computer.'
@@ -538,6 +577,14 @@ function Overview({ instance, address, addressHost, lanAddresses, localOnly, log
           <MetricCard icon={Users} label="Players online" value={`${instance.runtime.playerCount}`} detail={`${instance.maxPlayers} player slots`} tone="blue" />
           <MetricCard icon={Code2} label="Runtime" value={`Java ${instance.requiredJavaVersion}`} detail={`For Minecraft ${instance.version}`} tone="amber" />
         </section>
+      )}
+
+      {showBackupNotice && backupState && (
+        <button type="button" className={`backup-notice backup-notice-${backupNoticeTone}`} onClick={onBackups}>
+          <span>{backupState.status === 'running' ? <LoaderCircle className="spin" size={19} /> : <HardDrive size={19} />}</span>
+          <div><strong>{backupNoticeTitle}</strong><small>{backupState.error ?? backupState.message ?? (backupOverdue ? 'The next world backup is due.' : 'Open Settings for backup details.')}</small></div>
+          <span>View backups <ChevronRight size={14} /></span>
+        </button>
       )}
 
       <section className="dashboard-grid">
@@ -949,15 +996,21 @@ function ConsoleView({ instance, logs, onSend }: {
   )
 }
 
-function SettingsView({ instance, totalMemoryMb, appSettings, saving, appSettingsSaving, deleting, onSave, onAppSettings, onDeleteRequest }: {
+function SettingsView({ instance, totalMemoryMb, appSettings, backupState, saving, appSettingsSaving, backupPolicySaving, backupActionBusy, deleting, onSave, onAppSettings, onBackupPolicy, onBackupNow, onOpenBackups, onDeleteRequest }: {
   instance: InstanceView
   totalMemoryMb: number
   appSettings: AppSettings
+  backupState: BackupState | null
   saving: boolean
   appSettingsSaving: boolean
+  backupPolicySaving: boolean
+  backupActionBusy: boolean
   deleting: boolean
   onSave: (input: UpdateInstanceInput) => Promise<void>
   onAppSettings: (value: AppSettings) => void
+  onBackupPolicy: (value: UpdateBackupPolicyInput) => void
+  onBackupNow: () => void
+  onOpenBackups: () => void
   onDeleteRequest: () => void
 }): React.JSX.Element {
   const [form, setForm] = useState<UpdateInstanceInput>(() => ({
@@ -1002,6 +1055,31 @@ function SettingsView({ instance, totalMemoryMb, appSettings, saving, appSetting
     setForm((current) => ({ ...current, performancePreset: preset, memoryMb: values.memoryMb, viewDistance: values.viewDistance, simulationDistance: values.simulationDistance }))
   }
   const active = instance.runtime.status === 'online' || instance.runtime.status === 'starting' || instance.runtime.status === 'stopping'
+  const backupRunning = backupState?.status === 'running'
+  const backupPolicyLocked = backupPolicySaving || backupRunning
+  const manualBackupBlockedReason = !backupState
+    ? 'Loading backup information…'
+    : backupRunning || backupActionBusy
+      ? 'A world backup is already in progress.'
+      : instance.runtime.status === 'starting' || instance.runtime.status === 'stopping'
+        ? 'Wait for the current server operation to finish.'
+        : instance.runtime.status === 'online' && instance.runtime.playerCount > 0
+          ? `Waiting for ${instance.runtime.playerCount} ${instance.runtime.playerCount === 1 ? 'player' : 'players'} to disconnect.`
+          : null
+  const backupStatusTitle = !backupState
+    ? 'Loading backup status'
+    : backupState.status === 'running'
+      ? 'Creating a consistent world backup'
+      : backupState.status === 'failed'
+        ? 'Backup needs attention'
+        : backupState.status === 'waiting'
+          ? 'Waiting for a safe backup window'
+          : backupState.policy.enabled
+            ? 'Automatic backups are on'
+            : 'Automatic backups are off'
+  const backupStatusText = backupState?.error ?? backupState?.message ?? (backupState?.policy.enabled
+    ? 'EmberHost will create the next backup when it is due and safe to do so.'
+    : 'Manual backups remain available while the schedule is off.')
 
   return (
     <form className="page-content settings-content" onSubmit={(event) => { event.preventDefault(); void onSave(form) }}>
@@ -1036,6 +1114,45 @@ function SettingsView({ instance, totalMemoryMb, appSettings, saving, appSetting
         </div>
       </section>
 
+      <section className="settings-section backup-settings-section">
+        <div className="settings-title"><span><HardDrive size={19} /></span><div><h3>Automatic world backups</h3><p>Keep rolling local copies of the Overworld, Nether, and End.</p></div></div>
+        <div className="settings-fields backup-settings-fields">
+          {backupState ? (
+            <>
+              <Toggle
+                checked={backupState.policy.enabled}
+                disabled={backupPolicyLocked}
+                onChange={(enabled) => onBackupPolicy({ instanceId: instance.id, enabled, intervalHours: backupState.policy.intervalHours, retentionCount: backupState.policy.retentionCount })}
+                label="Back up this world automatically"
+                description="Runs while EmberHost is open. A new server gets its first backup after about 15 minutes."
+              />
+              <div className="backup-policy-grid">
+                <label className="field"><span>Backup frequency</span><select value={backupState.policy.intervalHours} disabled={backupPolicyLocked} onChange={(event) => onBackupPolicy({ instanceId: instance.id, enabled: backupState.policy.enabled, intervalHours: Number(event.target.value) as BackupIntervalHours, retentionCount: backupState.policy.retentionCount })}>{backupIntervalOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label>
+                <label className="field"><span>Automatic copies to keep</span><select value={backupState.policy.retentionCount} disabled={backupPolicyLocked} onChange={(event) => onBackupPolicy({ instanceId: instance.id, enabled: backupState.policy.enabled, intervalHours: backupState.policy.intervalHours, retentionCount: Number(event.target.value) as BackupRetentionCount })}>{backupRetentionOptions.map((count) => <option key={count} value={count}>{count}</option>)}</select></label>
+              </div>
+              <div className={`backup-status-card backup-status-${backupState.status}`} role={backupState.status === 'failed' ? 'alert' : 'status'}>
+                <div className="backup-status-heading">
+                  <span>{backupState.status === 'running' ? <LoaderCircle className="spin" size={18} /> : backupState.status === 'failed' ? <AlertTriangle size={18} /> : backupState.status === 'waiting' ? <Clock3 size={18} /> : <ShieldCheck size={18} />}</span>
+                  <div><strong>{backupStatusTitle}</strong><small>{backupStatusText}</small></div>
+                </div>
+                <div className="backup-status-metrics">
+                  <div><span>Last completed</span><strong><time dateTime={backupState.lastSuccessfulAt ?? undefined}>{formatBackupTime(backupState.lastSuccessfulAt)}</time></strong></div>
+                  <div><span>Next due</span><strong><time dateTime={backupState.nextBackupAt ?? undefined}>{backupState.policy.enabled ? formatBackupTime(backupState.nextBackupAt) : 'Schedule off'}</time></strong></div>
+                  <div><span>Stored locally</span><strong>{backupState.backupCount} {backupState.backupCount === 1 ? 'copy' : 'copies'} · {formatBackupBytes(backupState.totalBytes)}</strong></div>
+                </div>
+              </div>
+              <div className="backup-actions">
+                <button type="button" className="button primary" disabled={Boolean(manualBackupBlockedReason) || backupPolicySaving} onClick={onBackupNow}>{backupRunning || backupActionBusy ? <LoaderCircle className="spin" size={16} /> : <Save size={16} />} {backupRunning || backupActionBusy ? 'Backing up…' : 'Back up now'}</button>
+                <button type="button" className="button secondary" onClick={onOpenBackups}><FolderOpen size={16} /> Open backups folder</button>
+                {manualBackupBlockedReason && <small className="backup-blocked-reason">{manualBackupBlockedReason}</small>}
+              </div>
+              <div className="backup-safety-note"><ShieldCheck size={17} /><div><strong>Designed for consistent world saves</strong><span>If the server is online, EmberHost waits for every player to leave, temporarily stops Minecraft, copies the active world, checks its file counts and sizes, then starts it again. Older automatic copies beyond this limit are permanently removed only after a new backup succeeds.</span></div></div>
+              <div className="backup-scope-note"><Info size={16} /><span>World backups include world and player data, not plugins or server configuration. They stay on this computer, so they help with corruption or mistakes but do not protect against drive failure. World-preparation backups and unrecognized folders are never pruned.</span></div>
+            </>
+          ) : <div className="backup-loading" role="status"><LoaderCircle className="spin" size={18} /><span>Loading backup information…</span></div>}
+        </div>
+      </section>
+
       <section className="settings-section">
         <div className="settings-title"><span><Settings size={19} /></span><div><h3>EmberHost behavior</h3><p>How the desktop app runs on this computer.</p></div></div>
         <div className="settings-fields toggle-stack">
@@ -1046,10 +1163,10 @@ function SettingsView({ instance, totalMemoryMb, appSettings, saving, appSetting
 
       <section className="settings-section danger-zone">
         <div className="settings-title"><span><Trash2 size={19} /></span><div><h3>Delete server</h3><p>Move this server, its world, backups, and plugins to the recycle bin.</p></div></div>
-        <div className="settings-fields danger-action"><div><strong>Delete {instance.name}</strong><span>Shared download caches are kept so other servers continue to work.</span></div><button type="button" className="button danger" disabled={active || saving || deleting} onClick={onDeleteRequest}><Trash2 size={16} /> Delete server</button></div>
+        <div className="settings-fields danger-action"><div><strong>Delete {instance.name}</strong><span>Shared download caches are kept so other servers continue to work.</span></div><button type="button" className="button danger" disabled={active || saving || deleting || backupRunning} onClick={onDeleteRequest}><Trash2 size={16} /> Delete server</button></div>
       </section>
 
-      <div className="save-bar"><span>{active ? 'Configuration is locked while the server is active.' : 'Unknown server.properties entries will be preserved.'}</span><button className="button primary" disabled={saving || active}>{saving ? <LoaderCircle className="spin" size={17} /> : <Save size={17} />} Save changes</button></div>
+      <div className="save-bar"><span>{backupRunning ? 'Configuration is locked while the world is being backed up.' : active ? 'Configuration is locked while the server is active.' : 'Unknown server.properties entries will be preserved.'}</span><button className="button primary" disabled={saving || active || backupRunning}>{saving ? <LoaderCircle className="spin" size={17} /> : <Save size={17} />} Save changes</button></div>
     </form>
   )
 }
@@ -1156,6 +1273,7 @@ export default function App(): React.JSX.Element {
   const [worldSeedLoadingByInstance, setWorldSeedLoadingByInstance] = useState<Record<string, boolean>>({})
   const [worldSeedErrorsByInstance, setWorldSeedErrorsByInstance] = useState<Record<string, string>>({})
   const [worldSeedRefreshRequest, setWorldSeedRefreshRequest] = useState(0)
+  const [backupStates, setBackupStates] = useState<Record<string, BackupState>>({})
   const [paperPlugins, setPaperPlugins] = useState<Record<string, PaperPluginInfo[]>>({})
   const [paperPluginCatalogs, setPaperPluginCatalogs] = useState<Record<string, CatalogPaperPlugin[]>>({})
   const [busy, setBusy] = useState(false)
@@ -1165,6 +1283,8 @@ export default function App(): React.JSX.Element {
   const [pluginBusy, setPluginBusy] = useState(false)
   const [catalogInstall, setCatalogInstall] = useState<{ instanceId: string; projectId: string } | null>(null)
   const [saving, setSaving] = useState(false)
+  const [backupPolicySaving, setBackupPolicySaving] = useState(false)
+  const [backupActionBusy, setBackupActionBusy] = useState(false)
   const [deleteTarget, setDeleteTarget] = useState<InstanceView | null>(null)
   const [deleting, setDeleting] = useState(false)
   const [regenerationTarget, setRegenerationTarget] = useState<RegenerationTarget | null>(null)
@@ -1190,6 +1310,8 @@ export default function App(): React.JSX.Element {
   const selectedWorldSeedReady = selected
     ? Object.prototype.hasOwnProperty.call(worldSeeds, selected.id) && !selectedWorldSeedLoading && !selectedWorldSeedError
     : false
+  const selectedBackupState = selected ? backupStates[selected.id] ?? null : null
+  const selectedBackupRunning = selectedBackupState?.status === 'running'
   const selectedPlugins = selected ? paperPlugins[selected.id] ?? [] : []
   const selectedPluginCatalog = selected ? paperPluginCatalogs[selected.id] ?? [] : []
   const selectedAddressHost = selectedLanAddress ?? lanAddresses[0] ?? 'localhost'
@@ -1208,7 +1330,7 @@ export default function App(): React.JSX.Element {
     ? 'Stop the server before regenerating its world.'
     : regenerationPreparation?.status === 'running' || regenerationPreparation?.status === 'paused'
       ? 'Cancel the active or paused world preparation before regenerating.'
-      : busy || worldBusy
+      : busy || worldBusy || selectedBackupRunning
         ? 'Wait for the current server operation to finish.'
         : null
 
@@ -1285,8 +1407,9 @@ export default function App(): React.JSX.Element {
     const paperApi = window.emberHost as PaperApi
     const removePreparation = paperApi.onWorldPreparationChange((state) => setWorldPreparations((current) => ({ ...current, [state.instanceId]: state })))
     const removeForceLoads = paperApi.onForceLoadedRegionsChange((state) => setForceLoadedRegions((current) => ({ ...current, [state.instanceId]: state })))
+    const removeBackupState = paperApi.onBackupStateChange((state) => setBackupStates((current) => ({ ...current, [state.instanceId]: state })))
     const timer = window.setInterval(() => setNow(Date.now()), 1000)
-    return () => { removeProgress(); removeConsole(); removeState(); removePreparation(); removeForceLoads(); window.clearInterval(timer) }
+    return () => { removeProgress(); removeConsole(); removeState(); removePreparation(); removeForceLoads(); removeBackupState(); window.clearInterval(timer) }
   }, [])
 
   useEffect(() => {
@@ -1323,6 +1446,7 @@ export default function App(): React.JSX.Element {
   useEffect(() => {
     if (!selected) return
     void window.emberHost.getLogs(selected.id).then((entries) => setLogs((current) => ({ ...current, [selected.id]: entries })))
+    void window.emberHost.getBackupState(selected.id).then((state) => setBackupStates((current) => ({ ...current, [selected.id]: state }))).catch((error) => toast('error', friendlyError(error)))
     if (instanceSoftware(selected).kind === 'paper') {
       const paperApi = window.emberHost as PaperApi
       void paperApi.getWorldPreparation(selected.id).then((state) => setWorldPreparations((current) => ({ ...current, [selected.id]: state }))).catch(() => undefined)
@@ -1416,7 +1540,7 @@ export default function App(): React.JSX.Element {
   }
 
   const startStop = async (): Promise<void> => {
-    if (!selected || busy || worldBusy || regenerating) return
+    if (!selected || busy || worldBusy || regenerating || selectedBackupRunning) return
     setBusy(true)
     try {
       const active = selected.runtime.status === 'online' || selected.runtime.status === 'starting'
@@ -1439,7 +1563,7 @@ export default function App(): React.JSX.Element {
     action: ((api: PaperApi, instanceId: string) => Promise<WorldPreparationState>),
     successMessage: string
   ): Promise<void> => {
-    if (!selected || worldBusy || busy || regenerating) return
+    if (!selected || worldBusy || busy || regenerating || selectedBackupRunning) return
     setWorldBusy(true)
     try {
       const result = await action(window.emberHost as PaperApi, selected.id)
@@ -1469,7 +1593,7 @@ export default function App(): React.JSX.Element {
   }
 
   const requestWorldRegeneration = (seed: string): void => {
-    if (!selected || regenerating || busy || worldBusy || !selectedWorldSeedReady) return
+    if (!selected || regenerating || busy || worldBusy || selectedBackupRunning || !selectedWorldSeedReady) return
     const preparation = worldPreparations[selected.id] ?? emptyWorldPreparation(selected.id)
     const active = selected.runtime.status === 'online' || selected.runtime.status === 'starting' || selected.runtime.status === 'stopping'
     if (active || preparation.status === 'running' || preparation.status === 'paused') return
@@ -1505,7 +1629,7 @@ export default function App(): React.JSX.Element {
     action: ((api: PaperApi, instanceId: string) => Promise<ForceLoadedRegionsState>),
     successMessage: string
   ): Promise<void> => {
-    if (!selected || worldBusy || busy || regenerating) return
+    if (!selected || worldBusy || busy || regenerating || selectedBackupRunning) return
     setWorldBusy(true)
     try {
       const result = await action(window.emberHost as PaperApi, selected.id)
@@ -1674,6 +1798,33 @@ export default function App(): React.JSX.Element {
     }).finally(() => setAppSettingsSaving(false))
   }
 
+  const updateBackupPolicy = (input: UpdateBackupPolicyInput): void => {
+    if (backupPolicySaving || selectedBackupRunning) return
+    setBackupPolicySaving(true)
+    void window.emberHost.updateBackupPolicy(input).then((state) => {
+      setBackupStates((current) => ({ ...current, [state.instanceId]: state }))
+      toast('success', state.policy.enabled ? 'Automatic backup schedule updated.' : 'Automatic backups turned off.')
+    }).catch((error) => toast('error', friendlyError(error))).finally(() => setBackupPolicySaving(false))
+  }
+
+  const createBackupNow = (): void => {
+    if (!selected || backupActionBusy || selectedBackupRunning) return
+    const targetId = selected.id
+    setBackupActionBusy(true)
+    void window.emberHost.createBackupNow(targetId).then((state) => {
+      setBackupStates((current) => ({ ...current, [state.instanceId]: state }))
+      toast('success', 'World backup created and checked.')
+    }).catch((error) => {
+      toast('error', friendlyError(error))
+      void window.emberHost.getBackupState(targetId).then((state) => setBackupStates((current) => ({ ...current, [state.instanceId]: state }))).catch(() => undefined)
+    }).finally(() => setBackupActionBusy(false))
+  }
+
+  const openBackupsFolder = (): void => {
+    if (!selected) return
+    void window.emberHost.openBackupsFolder(selected.id).catch((error) => toast('error', friendlyError(error)))
+  }
+
   const deleteInstance = async (confirmationName: string): Promise<void> => {
     if (!deleteTarget || deleting) return
     const target = deleteTarget
@@ -1687,6 +1838,7 @@ export default function App(): React.JSX.Element {
       setWorldPreparations((current) => { const next = { ...current }; delete next[target.id]; return next })
       setForceLoadedRegions((current) => { const next = { ...current }; delete next[target.id]; return next })
       setWorldSeeds((current) => { const next = { ...current }; delete next[target.id]; return next })
+      setBackupStates((current) => { const next = { ...current }; delete next[target.id]; return next })
       setWorldSeedLoadingByInstance((current) => { const next = { ...current }; delete next[target.id]; return next })
       setWorldSeedErrorsByInstance((current) => { const next = { ...current }; delete next[target.id]; return next })
       setPaperPlugins((current) => { const next = { ...current }; delete next[target.id]; return next })
@@ -1709,7 +1861,7 @@ export default function App(): React.JSX.Element {
     <div className="app-shell">
       <aside className="sidebar">
         <div className="brand"><BrandMark /><div><strong>EmberHost</strong><small>Server manager</small></div></div>
-        <div className="instance-select-wrap"><span>Active server</span><select aria-label="Active server" value={selected?.id ?? ''} onChange={(event) => selectInstance(event.target.value)} disabled={!instances.length || regenerating}>{instances.length ? instances.map((instance) => <option value={instance.id} key={instance.id}>{instance.name}</option>) : <option>No server yet</option>}</select></div>
+        <div className="instance-select-wrap"><span>Active server</span><select aria-label="Active server" value={selected?.id ?? ''} onChange={(event) => selectInstance(event.target.value)} disabled={!instances.length || regenerating || selectedBackupRunning}>{instances.length ? instances.map((instance) => <option value={instance.id} key={instance.id}>{instance.name}</option>) : <option>No server yet</option>}</select></div>
         <nav aria-label="Main navigation">
           <span>Workspace</span>
           <button className={view === 'overview' ? 'active' : ''} onClick={() => setView('overview')}><LayoutDashboard size={18} /> Overview</button>
@@ -1731,16 +1883,16 @@ export default function App(): React.JSX.Element {
             {selected && <StatusBadge status={selected.runtime.status} />}
             {selected && <button className="icon-button" title="Open server folder" aria-label="Open server folder" onClick={() => void window.emberHost.openServerFolder(selected.id).catch((error) => toast('error', friendlyError(error)))}><FolderOpen size={18} /></button>}
             <button className="button secondary compact" onClick={openCreate}><Plus size={16} /> New server</button>
-            {selected && <button className={`button compact ${selectedActive || selectedStopping ? 'danger' : 'primary'}`} disabled={busy || worldBusy || regenerating || selectedStopping} onClick={() => void startStop()}>{busy || selectedStopping ? <LoaderCircle className="spin" size={16} /> : selectedActive ? <CircleStop size={16} /> : <Play size={16} />}{selectedStopping ? 'Stopping' : selectedActive ? 'Stop' : 'Start'}</button>}
+            {selected && <button className={`button compact ${selectedActive || selectedStopping ? 'danger' : 'primary'}`} disabled={busy || worldBusy || regenerating || selectedStopping || selectedBackupRunning} onClick={() => void startStop()}>{busy || selectedStopping || selectedBackupRunning ? <LoaderCircle className="spin" size={16} /> : selectedActive ? <CircleStop size={16} /> : <Play size={16} />}{selectedBackupRunning ? 'Backing up' : selectedStopping ? 'Stopping' : selectedActive ? 'Stop' : 'Start'}</button>}
           </div>
         </header>
 
         {selected ? (
-          view === 'overview' ? <Overview instance={selected} address={selectedServerAddress} addressHost={selectedAddressHost} lanAddresses={lanAddresses} localOnly={!lanAddresses.length} logs={selectedLogs} now={now} busy={busy || worldBusy || regenerating} onStartStop={() => void startStop()} onOpenFolder={() => void window.emberHost.openServerFolder(selected.id).catch((error) => toast('error', friendlyError(error)))} onAddressChange={setSelectedLanAddress} onCopy={() => { void navigator.clipboard.writeText(selectedServerAddress).then(() => toast('info', 'Server address copied.')).catch((error) => toast('error', friendlyError(error))) }} onConsole={() => setView('console')} onWorld={openWorldView} />
-             : view === 'world' && selectedPreparation && selectedForceLoads ? <WorldToolsView key={selected.id} instance={selected} preparation={selectedPreparation} forceLoads={selectedForceLoads} busy={worldBusy || busy} configuredSeed={selectedWorldSeed} seedLoading={selectedWorldSeedLoading} seedReady={selectedWorldSeedReady} seedError={selectedWorldSeedError} regenerating={regenerating} onReloadSeed={reloadWorldSeed} onRegenerateRequest={requestWorldRegeneration} onStartPreparation={startWorldPreparation} onPausePreparation={pauseWorldPreparation} onResumePreparation={resumeWorldPreparation} onCancelPreparation={cancelWorldPreparation} onAddForceLoad={addForceLoadedRegion} onRemoveForceLoad={removeForceLoadedRegion} onCreatePaper={openCreate} />
+          view === 'overview' ? <Overview instance={selected} backupState={selectedBackupState} address={selectedServerAddress} addressHost={selectedAddressHost} lanAddresses={lanAddresses} localOnly={!lanAddresses.length} logs={selectedLogs} now={now} busy={busy || worldBusy || regenerating || selectedBackupRunning} onStartStop={() => void startStop()} onOpenFolder={() => void window.emberHost.openServerFolder(selected.id).catch((error) => toast('error', friendlyError(error)))} onAddressChange={setSelectedLanAddress} onCopy={() => { void navigator.clipboard.writeText(selectedServerAddress).then(() => toast('info', 'Server address copied.')).catch((error) => toast('error', friendlyError(error))) }} onConsole={() => setView('console')} onWorld={openWorldView} onBackups={() => setView('settings')} />
+             : view === 'world' && selectedPreparation && selectedForceLoads ? <WorldToolsView key={selected.id} instance={selected} preparation={selectedPreparation} forceLoads={selectedForceLoads} busy={worldBusy || busy || selectedBackupRunning} configuredSeed={selectedWorldSeed} seedLoading={selectedWorldSeedLoading} seedReady={selectedWorldSeedReady} seedError={selectedWorldSeedError} regenerating={regenerating} onReloadSeed={reloadWorldSeed} onRegenerateRequest={requestWorldRegeneration} onStartPreparation={startWorldPreparation} onPausePreparation={pauseWorldPreparation} onResumePreparation={resumeWorldPreparation} onCancelPreparation={cancelWorldPreparation} onAddForceLoad={addForceLoadedRegion} onRemoveForceLoad={removeForceLoadedRegion} onCreatePaper={openCreate} />
                : view === 'plugins' ? <PluginsView key={selected.id} instance={selected} plugins={selectedPlugins} catalog={selectedPluginCatalog} loading={pluginLoading} catalogLoading={catalogLoading} busy={pluginBusy || pluginLoading || catalogLoading} installingProjectId={catalogInstall?.instanceId === selected.id ? catalogInstall.projectId : null} onInstall={() => void installPaperPlugin()} onInstallCatalog={(projectId) => void installCatalogPaperPlugin(projectId)} onOpenCatalogSource={openPaperPluginSource} onRemove={(fileName) => void removePaperPlugin(fileName)} onRefresh={() => void refreshPaperPlugins()} onRefreshCatalog={() => void refreshPaperPluginCatalog()} onCreatePaper={openCreate} />
                : view === 'console' ? <ConsoleView key={selected.id} instance={selected} logs={selectedLogs} onSend={sendCommand} />
-                : <SettingsView instance={selected} totalMemoryMb={bootstrap.totalMemoryMb} appSettings={appSettings} saving={saving} appSettingsSaving={appSettingsSaving} deleting={deleting} onSave={saveSettings} onAppSettings={saveAppSettings} onDeleteRequest={() => setDeleteTarget(selected)} />
+                : <SettingsView instance={selected} totalMemoryMb={bootstrap.totalMemoryMb} appSettings={appSettings} backupState={selectedBackupState} saving={saving} appSettingsSaving={appSettingsSaving} backupPolicySaving={backupPolicySaving} backupActionBusy={backupActionBusy} deleting={deleting} onSave={saveSettings} onAppSettings={saveAppSettings} onBackupPolicy={updateBackupPolicy} onBackupNow={createBackupNow} onOpenBackups={openBackupsFolder} onDeleteRequest={() => setDeleteTarget(selected)} />
         ) : <div className="empty-workspace"><BrandMark large /><h2>Create your first server</h2><p>Start with recommended Paper performance or choose the official Vanilla experience.</p><button className="button primary" onClick={openCreate}><Plus size={17} /> Create a server</button></div>}
       </main>
 

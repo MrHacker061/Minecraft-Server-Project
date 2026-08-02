@@ -20,6 +20,15 @@ async function waitForInputValue(input, expected, timeoutMs = 10_000) {
   throw new Error(`Input did not reach the expected value: ${expected}`)
 }
 
+async function waitForEnabledInputValue(input, expected, timeoutMs = 10_000) {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    if (await input.isEnabled() && await input.inputValue() === expected) return
+    await new Promise((resolveWait) => setTimeout(resolveWait, 50))
+  }
+  throw new Error(`Enabled input did not settle on the expected value: ${expected}`)
+}
+
 await rm(testProfile, { recursive: true, force: true })
 await mkdir(serverDirectory, { recursive: true })
 await mkdir(paperServerDirectory, { recursive: true })
@@ -31,8 +40,15 @@ const vanillaWorldDirectories = [
   resolve(serverDirectory, `${vanillaLevelName}_nether`),
   resolve(serverDirectory, `${vanillaLevelName}_the_end`)
 ]
+const paperWorldDirectories = [
+  resolve(paperServerDirectory, 'world'),
+  resolve(paperServerDirectory, 'world_nether'),
+  resolve(paperServerDirectory, 'world_the_end')
+]
 await Promise.all(vanillaWorldDirectories.map((directory) => mkdir(directory, { recursive: true })))
 await Promise.all(vanillaWorldDirectories.map((directory, index) => writeFile(resolve(directory, 'level.dat'), `world-${index}`, 'utf8')))
+await Promise.all(paperWorldDirectories.map((directory) => mkdir(directory, { recursive: true })))
+await Promise.all(paperWorldDirectories.map((directory, index) => writeFile(resolve(directory, 'level.dat'), `paper-world-${index}`, 'utf8')))
 await writeFile(resolve(serverDirectory, 'server.jar'), 'seeded vanilla server', 'utf8')
 await writeFile(resolve(paperServerDirectory, 'paper.jar'), 'seeded paper server', 'utf8')
 await writeFile(resolve(serverDirectory, 'emberhost-instance.json'), `${JSON.stringify({ id: serverId })}\n`, 'utf8')
@@ -254,6 +270,39 @@ try {
   await window.getByText('Paper Ridge console').waitFor()
   await window.getByRole('button', { name: 'Settings', exact: true }).click()
   await window.getByText('Server identity').waitFor()
+  await window.getByText('Automatic world backups', { exact: true }).waitFor()
+  const automaticBackupToggle = window.getByRole('checkbox', { name: /Back up this world automatically/ })
+  if (!(await automaticBackupToggle.isChecked())) throw new Error('Automatic backups were not enabled by default.')
+  const backupFrequency = window.getByLabel('Backup frequency')
+  const backupRetention = window.getByLabel('Automatic copies to keep')
+  await waitForEnabledInputValue(backupFrequency, '6')
+  await waitForEnabledInputValue(backupRetention, '3')
+  await backupFrequency.selectOption('12')
+  await waitForEnabledInputValue(backupFrequency, '12')
+  await backupRetention.selectOption('5')
+  await waitForEnabledInputValue(backupRetention, '5')
+  await window.getByRole('button', { name: 'Back up now', exact: true }).click()
+  await window.getByText('World backup created and checked.', { exact: true }).waitFor({ timeout: 30_000 })
+  await window.getByText(/1 copy ·/).waitFor()
+  const automaticBackupDirectory = resolve(paperServerDirectory, 'emberhost-backups', 'automatic')
+  const automaticBackupNames = (await readdir(automaticBackupDirectory)).filter((name) => /^auto-.*-[0-9a-f-]{36}$/i.test(name))
+  if (automaticBackupNames.length !== 1) throw new Error(`Expected one verified automatic backup, found: ${automaticBackupNames.join(', ')}`)
+  const automaticBackupPath = resolve(automaticBackupDirectory, automaticBackupNames[0])
+  const backupManifest = JSON.parse(await readFile(resolve(automaticBackupPath, 'emberhost-backup.json'), 'utf8'))
+  if (backupManifest.schemaVersion !== 1 || backupManifest.kind !== 'automatic' || backupManifest.instanceId !== paperServerId || backupManifest.scope !== 'active-world-only') {
+    throw new Error(`Automatic backup manifest was invalid: ${JSON.stringify(backupManifest)}`)
+  }
+  if (backupManifest.captureMode !== 'offline' || backupManifest.worlds?.length !== 3) {
+    throw new Error(`Automatic backup did not capture all three offline world folders: ${JSON.stringify(backupManifest)}`)
+  }
+  for (const directory of paperWorldDirectories) {
+    await access(resolve(automaticBackupPath, directory.split(/[\\/]/).at(-1), 'level.dat'))
+  }
+  const savedBackupPolicy = JSON.parse(await readFile(resolve(paperServerDirectory, 'emberhost-backup-policy.json'), 'utf8'))
+  if (!savedBackupPolicy.enabled || savedBackupPolicy.intervalHours !== 12 || savedBackupPolicy.retentionCount !== 5 || !savedBackupPolicy.lastSuccessfulAt) {
+    throw new Error(`Automatic backup policy did not persist: ${JSON.stringify(savedBackupPolicy)}`)
+  }
+  await window.screenshot({ path: resolve(artifacts, 'backup-settings.png') })
   await window.getByRole('button', { name: 'Delete server', exact: true }).click()
   const deleteDialog = window.getByRole('dialog', { name: 'Delete Paper Ridge?' })
   await deleteDialog.waitFor()
@@ -270,7 +319,7 @@ try {
   await deleteDialog.getByRole('button', { name: 'Cancel', exact: true }).click()
   await access(resolve(testProfile, 'runtime-data', 'emberhost.json'))
   if (browserMessages.length) throw new Error(`Dashboard renderer errors after interactions: ${JSON.stringify(browserMessages)}`)
-  process.stdout.write(`${JSON.stringify({ dashboard: true, browserMessages, screenshots: ['artifacts/dashboard.png', 'artifacts/world-tools.png', 'artifacts/regenerate-confirm.png', 'artifacts/plugins-vanilla.png', 'artifacts/paper-dashboard.png', 'artifacts/paper-world-tools.png', 'artifacts/paper-plugins.png', 'artifacts/delete-confirm.png'] })}\n`)
+  process.stdout.write(`${JSON.stringify({ dashboard: true, browserMessages, screenshots: ['artifacts/dashboard.png', 'artifacts/world-tools.png', 'artifacts/regenerate-confirm.png', 'artifacts/plugins-vanilla.png', 'artifacts/paper-dashboard.png', 'artifacts/paper-world-tools.png', 'artifacts/paper-plugins.png', 'artifacts/backup-settings.png', 'artifacts/delete-confirm.png'] })}\n`)
 } finally {
   await application.evaluate(({ app }) => {
     setTimeout(() => app.exit(0), 20)

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { commandSchema, createInstanceSchema, regenerateWorldSchema } from '../src/main/services/validation'
+import { commandSchema, createInstanceSchema, regenerateWorldSchema, updateBackupPolicySchema } from '../src/main/services/validation'
 
 describe('IPC validation', () => {
   it('requires explicit EULA acceptance', () => {
@@ -73,6 +73,27 @@ describe('IPC validation', () => {
       instanceId: 'a329da1a-18ad-4ba4-b3c6-afb6cbce70d1',
       seed: 'x'.repeat(129),
       confirmationName: 'World'
+    }).success).toBe(false)
+  })
+
+  it('accepts only supported automatic-backup intervals and retention counts', () => {
+    expect(updateBackupPolicySchema.safeParse({
+      instanceId: 'a329da1a-18ad-4ba4-b3c6-afb6cbce70d1',
+      enabled: true,
+      intervalHours: 6,
+      retentionCount: 3
+    }).success).toBe(true)
+    expect(updateBackupPolicySchema.safeParse({
+      instanceId: 'a329da1a-18ad-4ba4-b3c6-afb6cbce70d1',
+      enabled: true,
+      intervalHours: 2,
+      retentionCount: 3
+    }).success).toBe(false)
+    expect(updateBackupPolicySchema.safeParse({
+      instanceId: 'a329da1a-18ad-4ba4-b3c6-afb6cbce70d1',
+      enabled: true,
+      intervalHours: 6,
+      retentionCount: 2
     }).success).toBe(false)
   })
 })

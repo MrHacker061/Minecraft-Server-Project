@@ -17,6 +17,7 @@ import { checkJava } from './java'
 import { isMsptHeader, parseMsptValuesLine, parseTpsLine, sampleProcessHealth } from './metrics'
 import type { AppStore } from './store'
 import { assertNoInterruptedWorldRegeneration } from './world-regeneration-safety'
+import { assertNoBackupInProgress } from './backup-safety'
 
 interface ManagedProcess {
   child: ChildProcessWithoutNullStreams
@@ -26,6 +27,7 @@ interface ManagedProcess {
   readinessProbe: NodeJS.Timeout
   stopPromise: Promise<void> | null
   forcedStop: boolean
+  inputFailed: boolean
   logWritable: boolean
   logBackpressured: boolean
   logBytes: number
@@ -38,6 +40,15 @@ interface ManagedProcess {
 interface ServerManagerDependencies {
   checkJava: typeof checkJava
   sampleProcessHealth: typeof sampleProcessHealth
+  gracefulStopTimeoutMs: number
+  forcedStopTimeoutMs: number
+  maintenanceReadinessTimeoutMs: number
+  maintenanceInputWriteTimeoutMs: number
+  writeMaintenanceInput: (
+    child: ChildProcessWithoutNullStreams,
+    value: string,
+    callback: (error?: Error | null) => void
+  ) => void
   spawnProcess: (
     command: string,
     args: string[],
@@ -52,6 +63,16 @@ interface ServerManagerDependencies {
 
 type ConsoleListener = (entry: ConsoleEntry) => void
 type StateListener = (event: StateEvent) => void
+
+export interface OfflineMaintenanceContext {
+  instance: ServerInstance
+  restartAfter: boolean
+}
+
+export interface OfflineMaintenanceLifecycle {
+  beforeStop?: (context: OfflineMaintenanceContext) => Promise<void>
+  finalize?: () => Promise<void>
+}
 
 const offlineRuntime = (): InstanceRuntime => ({
   status: 'offline',
@@ -101,6 +122,7 @@ export class ServerManager {
   private readonly stateListeners = new Set<StateListener>()
   private readonly operations = new Map<string, Promise<unknown>>()
   private readonly markerCleanups = new Map<string, Promise<void>>()
+  private readonly maintenanceInstances = new Set<string>()
   private shuttingDown = false
   private readonly dependencies: ServerManagerDependencies
 
@@ -111,6 +133,11 @@ export class ServerManager {
     this.dependencies = {
       checkJava,
       sampleProcessHealth,
+      gracefulStopTimeoutMs: 30_000,
+      forcedStopTimeoutMs: 5_000,
+      maintenanceReadinessTimeoutMs: 120_000,
+      maintenanceInputWriteTimeoutMs: 5_000,
+      writeMaintenanceInput: (child, value, callback) => { child.stdin.write(value, callback) },
       spawnProcess: (command, args, options) => spawn(command, args, options),
       ...dependencies
     }
@@ -128,6 +155,191 @@ export class ServerManager {
 
   runExclusive<T>(instanceId: string, operation: () => Promise<T>): Promise<T> {
     return this.serialize(instanceId, operation)
+  }
+
+  async runOfflineMaintenance<T>(
+    instanceId: string,
+    operation: (context: OfflineMaintenanceContext) => Promise<T>,
+    lifecycle: OfflineMaintenanceLifecycle = {}
+  ): Promise<T> {
+    if (this.maintenanceInstances.has(instanceId)) {
+      throw new AppError('Offline maintenance is already in progress for this server.', 'SERVER_MAINTENANCE')
+    }
+    this.maintenanceInstances.add(instanceId)
+    try {
+      return await this.runExclusive(instanceId, async () => {
+        const instance = this.requireInstance(instanceId)
+        await this.markerCleanups.get(instanceId)
+        const status = this.runtimes.get(instanceId)?.status ?? 'offline'
+        if (status === 'starting') {
+          throw new AppError(
+            'Wait for the server to finish starting before beginning offline maintenance.',
+            'SERVER_BUSY'
+          )
+        }
+        if (status === 'stopping') {
+          throw new AppError(
+            'Wait for the server to finish stopping before beginning offline maintenance.',
+            'SERVER_BUSY'
+          )
+        }
+        if (status === 'crashed') {
+          throw new AppError(
+            'Restart the crashed server and let it reach a clean online state before creating a backup.',
+            'SERVER_CRASHED'
+          )
+        }
+
+        const restartAfter = status === 'online'
+        if (restartAfter) {
+          const runtime = this.runtimes.get(instanceId)
+          if (runtime && runtime.playerCount > 0) {
+            throw new AppError(
+              'Wait until every player disconnects before beginning offline maintenance.',
+              'PLAYERS_CONNECTED'
+            )
+          }
+        }
+
+        const context = { instance, restartAfter }
+        let lifecyclePrepared = false
+        let stoppedForMaintenance = false
+        let operationCompleted = false
+        let result: T | undefined
+        let failure: unknown = null
+        let restartFailure: unknown = null
+        let canFinalize = !restartAfter
+
+        if (!restartAfter) await this.assertStoppedAndUnowned(instanceId)
+        if (lifecycle.beforeStop) {
+          await lifecycle.beforeStop(context)
+          lifecyclePrepared = true
+        }
+
+        const runtimeAfterPreparation = this.runtimes.get(instanceId)
+        if (restartAfter && runtimeAfterPreparation?.status === 'online' && runtimeAfterPreparation.playerCount > 0) {
+          failure = new AppError(
+            'A player connected while maintenance was being prepared. Wait for everyone to disconnect and try again.',
+            'PLAYERS_CONNECTED'
+          )
+          canFinalize = true
+        }
+
+        if (restartAfter && !failure) {
+          stoppedForMaintenance = true
+          try {
+            await this.stopUnlocked(instanceId, true)
+          } catch (error) {
+            failure = error
+          }
+        }
+
+        if (!failure) {
+          try {
+            await this.assertStoppedAndUnowned(instanceId)
+            result = await operation(context)
+            operationCompleted = true
+          } catch (error) {
+            failure = error
+          }
+        }
+
+        if (stoppedForMaintenance) {
+          if (this.shuttingDown || this.isActive(instanceId)) {
+            canFinalize = true
+          } else {
+            try {
+              await this.startUnlocked(instanceId, lifecyclePrepared || operationCompleted)
+              if (lifecyclePrepared) await this.waitForMaintenanceReadiness(instanceId)
+              canFinalize = true
+            } catch (error) {
+              restartFailure = error
+              if (lifecyclePrepared && this.isActive(instanceId)) {
+                try {
+                  await this.stopUnlocked(instanceId)
+                } catch {
+                  // The recovery marker remains authoritative if the protective stop also fails.
+                }
+              }
+            }
+          }
+        }
+
+        if (lifecyclePrepared && canFinalize && lifecycle.finalize) {
+          try {
+            await lifecycle.finalize()
+          } catch (error) {
+            if (stoppedForMaintenance && this.isActive(instanceId)) {
+              try {
+                await this.stopUnlocked(instanceId)
+              } catch {
+                // The recovery marker remains authoritative if the protective stop also fails.
+              }
+            }
+            failure = failure
+              ? new AppError(
+                  `${this.errorMessage(failure)} Maintenance recovery finalization also failed.`,
+                  'MAINTENANCE_RECOVERY_REQUIRED',
+                  this.errorMessage(error)
+                )
+              : error
+          }
+        }
+
+        if (restartFailure) {
+          if (failure) {
+            throw new AppError(
+              `${this.errorMessage(failure)} EmberHost also could not restart the server; its recovery marker was retained.`,
+              'MAINTENANCE_RECOVERY_REQUIRED',
+              this.errorMessage(restartFailure)
+            )
+          }
+          throw lifecyclePrepared
+            ? new AppError(
+                'EmberHost could not restore the server to a ready state after maintenance; its recovery marker was retained.',
+                'MAINTENANCE_RECOVERY_REQUIRED',
+                this.errorMessage(restartFailure)
+              )
+            : restartFailure
+        }
+        if (failure) throw failure
+        return result as T
+      })
+    } finally {
+      this.maintenanceInstances.delete(instanceId)
+    }
+  }
+
+  async restartAfterInterruptedMaintenance(
+    instanceId: string,
+    completeAfterLaunch: () => Promise<void>
+  ): Promise<InstanceView> {
+    if (this.maintenanceInstances.has(instanceId)) {
+      throw new AppError('Offline maintenance is already in progress for this server.', 'SERVER_MAINTENANCE')
+    }
+    this.maintenanceInstances.add(instanceId)
+    try {
+      return await this.runExclusive(instanceId, async () => {
+        await this.assertStoppedAndUnowned(instanceId)
+        await this.startUnlocked(instanceId, true)
+        try {
+          await this.waitForMaintenanceReadiness(instanceId)
+          await completeAfterLaunch()
+        } catch (error) {
+          if (this.isActive(instanceId)) {
+            try {
+              await this.stopUnlocked(instanceId)
+            } catch {
+              // The recovery marker remains authoritative if the protective stop also fails.
+            }
+          }
+          throw error
+        }
+        return this.getView(this.requireInstance(instanceId))
+      })
+    } finally {
+      this.maintenanceInstances.delete(instanceId)
+    }
   }
 
   beginShutdown(): void {
@@ -176,7 +388,10 @@ export class ServerManager {
   }
 
   async start(instanceId: string): Promise<InstanceView> {
-    return this.runExclusive(instanceId, async () => {
+    return this.runExclusive(instanceId, () => this.startUnlocked(instanceId))
+  }
+
+  private async startUnlocked(instanceId: string, allowOwnedBackupRecovery = false): Promise<InstanceView> {
       if (this.shuttingDown) throw new AppError('EmberHost is shutting down and cannot start another server.', 'APP_SHUTTING_DOWN')
       const instance = this.requireInstance(instanceId)
       await this.markerCleanups.get(instanceId)
@@ -184,6 +399,7 @@ export class ServerManager {
         throw new AppError('This server is already running or changing state.', 'SERVER_BUSY')
       }
       await this.assertNoOrphan(instance)
+      if (!allowOwnedBackupRecovery) await assertNoBackupInProgress(instance)
       await assertNoInterruptedWorldRegeneration(instance)
 
       const java = await this.dependencies.checkJava(instance.javaPath)
@@ -265,6 +481,7 @@ export class ServerManager {
         readinessProbe,
         stopPromise: null,
         forcedStop: false,
+        inputFailed: false,
         logWritable: true,
         logBackpressured: false,
         logBytes: 0,
@@ -290,6 +507,7 @@ export class ServerManager {
       this.attachOutput(instanceId, managed, 'stdout')
       this.attachOutput(instanceId, managed, 'stderr')
       child.stdin.on('error', (error) => {
+        managed.inputFailed = true
         if (this.processes.get(instanceId) === managed) {
           this.emitConsole(instanceId, 'system', `Server input closed: ${error.message}`, 'warn')
         }
@@ -321,14 +539,22 @@ export class ServerManager {
       }
 
       return this.getView(instance)
-    })
   }
 
   async stop(instanceId: string): Promise<InstanceView> {
-    return this.runExclusive(instanceId, async () => {
+    return this.runExclusive(instanceId, () => this.stopUnlocked(instanceId))
+  }
+
+  private async stopUnlocked(instanceId: string, requireGraceful = false): Promise<InstanceView> {
       const instance = this.requireInstance(instanceId)
       const managed = this.processes.get(instanceId)
       if (!managed) {
+        if (requireGraceful) {
+          throw new AppError(
+            'Minecraft exited before EmberHost could prove a clean graceful maintenance stop, so the world was not copied.',
+            'MAINTENANCE_STOP_UNCLEAN'
+          )
+        }
         this.runtimes.set(instanceId, offlineRuntime())
         return this.getView(instance)
       }
@@ -341,9 +567,11 @@ export class ServerManager {
       managed.runtime.status = 'stopping'
       this.emitState(instanceId, managed.runtime)
       this.emitConsole(instanceId, 'system', 'Sending Minecraft a graceful stop command…')
-      this.writeInput(instanceId, managed, 'stop\n')
+      const stopCommandWritten = requireGraceful
+        ? await this.writeMaintenanceStop(instanceId, managed)
+        : this.writeInput(instanceId, managed, 'stop\n')
 
-      const stopOperation = this.waitForExit(managed.child, 30_000).then(async (exited) => {
+      const stopOperation = this.waitForExit(managed.child, this.dependencies.gracefulStopTimeoutMs).then(async (exited) => {
         if (!exited && this.processes.get(instanceId) === managed) {
           this.emitConsole(instanceId, 'system', 'Graceful shutdown timed out; terminating the server process.', 'warn')
           try {
@@ -352,7 +580,7 @@ export class ServerManager {
           } catch (error) {
             this.emitConsole(instanceId, 'system', `Could not terminate Java: ${error instanceof Error ? error.message : String(error)}`, 'error')
           }
-          const forcedExit = await this.waitForExit(managed.child, 5_000)
+          const forcedExit = await this.waitForExit(managed.child, this.dependencies.forcedStopTimeoutMs)
           if (!forcedExit && this.processes.get(instanceId) === managed) {
             managed.runtime.status = 'online'
             this.emitState(instanceId, managed.runtime)
@@ -366,11 +594,117 @@ export class ServerManager {
       } finally {
         if (this.processes.get(instanceId) === managed) managed.stopPromise = null
       }
+      const stoppedRuntime = this.runtimes.get(instanceId)
+      if (requireGraceful && (
+        !stopCommandWritten ||
+        managed.inputFailed ||
+        managed.forcedStop ||
+        stoppedRuntime?.lastExitCode !== 0
+      )) {
+        throw new AppError(
+          'Minecraft did not confirm a clean graceful stop, so EmberHost aborted offline maintenance without copying the world.',
+          'MAINTENANCE_STOP_UNCLEAN'
+        )
+      }
       return this.getView(instance)
+  }
+
+  private errorMessage(error: unknown): string {
+    return error instanceof Error ? error.message : String(error)
+  }
+
+  private async writeMaintenanceStop(instanceId: string, managed: ManagedProcess): Promise<boolean> {
+    if (managed.child.stdin.destroyed || !managed.child.stdin.writable) {
+      managed.inputFailed = true
+      return false
+    }
+    return new Promise<boolean>((resolvePromise) => {
+      let settled = false
+      const finish = (written: boolean): void => {
+        if (settled) return
+        settled = true
+        clearTimeout(timeout)
+        resolvePromise(written)
+      }
+      const timeout = setTimeout(() => {
+        managed.inputFailed = true
+        if (this.processes.get(instanceId) === managed) {
+          this.emitConsole(instanceId, 'system', 'Timed out while writing the maintenance stop command.', 'warn')
+        }
+        finish(false)
+      }, this.dependencies.maintenanceInputWriteTimeoutMs)
+      try {
+        this.dependencies.writeMaintenanceInput(managed.child, 'stop\n', (error) => {
+          if (error) {
+            managed.inputFailed = true
+            if (this.processes.get(instanceId) === managed) {
+              this.emitConsole(instanceId, 'system', `Could not write to the server console: ${error.message}`, 'warn')
+            }
+            finish(false)
+          } else {
+            finish(true)
+          }
+        })
+      } catch (error) {
+        managed.inputFailed = true
+        if (this.processes.get(instanceId) === managed) {
+          this.emitConsole(
+            instanceId,
+            'system',
+            `Could not write to the server console: ${error instanceof Error ? error.message : String(error)}`,
+            'warn'
+          )
+        }
+        finish(false)
+      }
+    })
+  }
+
+  private async waitForMaintenanceReadiness(instanceId: string): Promise<void> {
+    const current = this.runtimes.get(instanceId)?.status
+    if (current === 'online') return
+    if (current !== 'starting') {
+      throw new AppError('The server process exited before readiness was confirmed.', 'MAINTENANCE_RESTART_FAILED')
+    }
+    await new Promise<void>((resolvePromise, reject) => {
+      let settled = false
+      const finish = (error?: AppError): void => {
+        if (settled) return
+        settled = true
+        clearTimeout(timeout)
+        this.stateListeners.delete(listener)
+        if (error) reject(error)
+        else resolvePromise()
+      }
+      const listener: StateListener = (event) => {
+        if (event.instanceId !== instanceId) return
+        if (event.runtime.status === 'online') finish()
+        else if (event.runtime.status === 'offline' || event.runtime.status === 'crashed') {
+          finish(new AppError('The server process exited before readiness was confirmed.', 'MAINTENANCE_RESTART_FAILED'))
+        }
+      }
+      const timeout = setTimeout(() => {
+        finish(new AppError(
+          'The server did not become ready after its maintenance restart.',
+          'MAINTENANCE_RESTART_TIMEOUT'
+        ))
+      }, this.dependencies.maintenanceReadinessTimeoutMs)
+      this.stateListeners.add(listener)
+      const status = this.runtimes.get(instanceId)?.status
+      if (status === 'online') finish()
+      else if (status !== 'starting') {
+        finish(new AppError('The server process exited before readiness was confirmed.', 'MAINTENANCE_RESTART_FAILED'))
+      }
     })
   }
 
   async sendCommand(instanceId: string, command: string): Promise<void> {
+    if (this.maintenanceInstances.has(instanceId)) {
+      throw new AppError(
+        'Offline maintenance is in progress. Wait for it to finish before sending console commands.',
+        'SERVER_MAINTENANCE'
+      )
+    }
     const managed = this.processes.get(instanceId)
     if (!managed || (managed.runtime.status !== 'online' && managed.runtime.status !== 'starting')) {
       throw new AppError('Start the server before sending a command.', 'SERVER_OFFLINE')
@@ -396,11 +730,13 @@ export class ServerManager {
     try {
       managed.child.stdin.write(value, (error) => {
         if (error && this.processes.get(instanceId) === managed) {
+          managed.inputFailed = true
           this.emitConsole(instanceId, 'system', `Could not write to the server console: ${error.message}`, 'warn')
         }
       })
       return true
     } catch (error) {
+      managed.inputFailed = true
       this.emitConsole(instanceId, 'system', `Could not write to the server console: ${error instanceof Error ? error.message : String(error)}`, 'warn')
       return false
     }

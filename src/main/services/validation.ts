@@ -47,6 +47,13 @@ export const regenerateWorldSchema = z.object({
   confirmationName: serverName
 })
 
+export const updateBackupPolicySchema = z.object({
+  instanceId: instanceIdSchema,
+  enabled: z.boolean(),
+  intervalHours: z.union([z.literal(1), z.literal(3), z.literal(6), z.literal(12), z.literal(24)]),
+  retentionCount: z.union([z.literal(1), z.literal(3), z.literal(5), z.literal(7), z.literal(14)])
+})
+
 export const removePaperPluginSchema = z.object({
   instanceId: instanceIdSchema,
   fileName: z.string().min(5).max(240)

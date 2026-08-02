@@ -28,6 +28,7 @@ import {
 import type { ServerManager } from './server-manager'
 import type { AppStore } from './store'
 import { assertNoInterruptedWorldRegeneration } from './world-regeneration-safety'
+import { assertNoBackupInProgress } from './backup-safety'
 
 type ProgressListener = (progress: SetupProgress) => void
 type TrashItem = (path: string) => Promise<void>
@@ -227,6 +228,7 @@ export class InstanceService {
 
     await this.manager.assertStoppedAndUnowned(input.instanceId)
     const managedDirectory = await this.assertManagedInstanceDirectory(current)
+    await assertNoBackupInProgress(current)
     await assertNoInterruptedWorldRegeneration(current)
     const propertiesPath = join(managedDirectory, 'server.properties')
     const properties = await this.readManagedProperties(propertiesPath)
@@ -312,6 +314,7 @@ export class InstanceService {
 
     await this.manager.assertStoppedAndUnowned(input.id)
     const managedDirectory = await this.assertManagedInstanceDirectory(current)
+    await assertNoBackupInProgress(current)
     await assertNoInterruptedWorldRegeneration(current)
     const quarantinedDirectory = join(this.serversDirectory, `.${current.id}.deleting-${randomUUID()}`)
     await rename(managedDirectory, quarantinedDirectory)

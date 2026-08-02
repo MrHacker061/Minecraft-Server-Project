@@ -12,6 +12,10 @@ export const channels = {
   deleteInstance: 'instance:delete',
   getWorldSeed: 'world:get-seed',
   regenerateWorld: 'world:regenerate',
+  getBackupState: 'backups:get-state',
+  updateBackupPolicy: 'backups:update-policy',
+  createBackupNow: 'backups:create-now',
+  openBackupsFolder: 'backups:open-folder',
   startInstance: 'instance:start',
   stopInstance: 'instance:stop',
   command: 'instance:command',
@@ -37,5 +41,6 @@ export const channels = {
   consoleEntry: 'event:console-entry',
   stateChange: 'event:state-change',
   worldPreparationChange: 'event:world-preparation-change',
-  forceLoadedRegionsChange: 'event:force-loaded-regions-change'
+  forceLoadedRegionsChange: 'event:force-loaded-regions-change',
+  backupStateChange: 'event:backup-state-change'
 } as const

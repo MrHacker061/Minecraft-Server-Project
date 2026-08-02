@@ -24,6 +24,7 @@ EmberHost is a desktop control panel for turning a personal computer into a self
 - Manages up to eight non-overlapping force-loaded regions, with a seven-chunk radius and 256 total chunks.
 - Starts, stops, and monitors Java without invoking a shell.
 - Sends a graceful stop command before escalating after a timeout.
+- Creates checked rolling world backups on a per-server schedule, with bounded retention and an on-demand backup action.
 - Streams output into a live console and a persistent, size-capped instance log.
 - Persists multiple server configurations with atomic, schema-versioned JSON.
 - Changes the configured world seed and safely regenerates the active Overworld, Nether, and End for Vanilla or Paper.
@@ -60,7 +61,17 @@ Memory suggestions are capped against available system memory in the UI. Custom 
 
 World preparation generates terrain before players travel through it, which removes most exploration-time chunk-generation spikes. Prepared chunks use disk space but do not remain active. Force-loaded regions are different: they stay ticking without a nearby player and therefore consume ongoing CPU and memory. EmberHost keeps those regions deliberately small and bounded.
 
-Every preparation run writes a timestamped backup under emberhost-backups inside the server directory. Backups are not deleted automatically, so disk use should be reviewed periodically. If EmberHost cannot confirm that autosave was restored after a backup, it stops the server instead of continuing in an unsafe state.
+Every preparation run writes a timestamped safety backup under emberhost-backups inside the server directory. These preparation backups are separate from rolling automatic backups and are never pruned automatically, so their disk use should be reviewed periodically. If EmberHost cannot confirm that autosave was restored after a preparation backup, it stops the server instead of continuing in an unsafe state.
+
+## Automatic world backups
+
+Automatic backups are enabled per server by default, with the first copy due after roughly 15 minutes, then every 6 hours. Settings can change the interval to 1, 3, 6, 12, or 24 hours and retain the newest 1, 3, 5, 7, or 14 automatic copies. A manual **Back up now** action is available even when the schedule is disabled.
+
+EmberHost only copies a world while Minecraft is fully stopped. If a due server is online, it waits until every player disconnects, performs a graceful maintenance stop, copies and checks the active Overworld, Nether, and End, and then starts the server again. Starting, deleting, regenerating, preparing, and backing up the same world are serialized so they cannot mutate it concurrently. Interrupted operations leave a bounded recovery marker instead of silently starting from partial staging data.
+
+Each copy is staged and checked by file count and byte count before it is promoted under `emberhost-backups/automatic`. Retention runs only after a new copy succeeds and only removes recognized automatic backups belonging to that server; world-preparation backups, unknown folders, malformed entries, and symbolic links are never pruned. Automatic backups include world and player data, not plugins or server configuration.
+
+These copies live beside the server on the same computer. They are useful for recovering from world corruption or mistakes, but they do not protect against failure or loss of that drive. Copy important backups to another disk or an off-site destination for disaster recovery. Scheduling runs only while EmberHost is open; the tray can keep it active while the desktop user remains signed in.
 
 ## Requirements
 
@@ -68,7 +79,7 @@ Every preparation run writes a timestamped backup under emberhost-backups inside
 - A supported 64-bit Java runtime for the selected Minecraft release
 - Internet access for the initial metadata, server, and Chunky downloads
 - At least 4 GB of available memory for the recommended Paper profile
-- Additional SSD space for worlds and pregeneration backups
+- Additional SSD space for worlds, rolling backups, and pregeneration backups
 
 EmberHost reads javaVersion.majorVersion from Mojang's selected release metadata. If java is not on PATH, enter the full Java executable path during setup.
 
@@ -99,6 +110,7 @@ pnpm dist       # platform installer
 5. Select **Download & create**, then start the server.
 6. Open **Plugins** on a stopped Paper server to browse the curated catalog or add a trusted local plugin JAR.
 7. Open **World Tools** to set a seed or regenerate the active world. Paper servers can also prepare terrain or add small force-loaded regions.
+8. Open **Settings** to review the automatic world-backup schedule, retention, and latest checked copy.
 
 Mojang's manifest includes a few very early client releases for which it no longer publishes a server artifact. EmberHost shows those releases but refuses creation with a clear message rather than downloading an unofficial or unverifiable JAR.
 
@@ -129,8 +141,13 @@ Machine-local data root/
       ├─ eula.txt
       ├─ emberhost-instance.json
       ├─ emberhost-performance.json
+      ├─ emberhost-backup-policy.json
       ├─ emberhost-console.log
       ├─ emberhost-backups/
+      │  └─ automatic/
+      │     └─ auto-<timestamp>-<uuid>/
+      │        ├─ emberhost-backup.json
+      │        └─ <active world folders>/
       └─ world/ or the configured level-name
 ~~~
 
@@ -152,12 +169,13 @@ context-isolated preload
 Electron main process
     ├─ instance service ── Mojang, Paper, and Modrinth metadata/downloads
     ├─ server manager ──── Java lifecycle, console, and health samples
-    ├─ world service ───── backups, Chunky tasks, and bounded force-loads
+    ├─ world service ───── serialized world operations, Chunky tasks, and bounded force-loads
+    ├─ backup service ──── scheduling, checked snapshots, recovery, and retention
     ├─ plugin service ──── catalog resolution, verified installs, inventory, and removal
     └─ atomic store ────── app data and per-instance metadata
 ~~~
 
-Safeguards include contextIsolation, disabled Node integration, renderer sandboxing, denied navigation and popups, a restrictive CSP, IPC sender checks, Zod validation, UUID server directories, shell-free process spawning, atomic state writes, checksum verification, strict download hosts, redirect rejection, bounded streams, conservative orphan-process detection, archive validation, recoverable deletion, and transactional world regeneration with rollback and interrupted-operation guards.
+Safeguards include contextIsolation, disabled Node integration, renderer sandboxing, denied navigation and popups, a restrictive CSP, IPC sender checks, Zod validation, UUID server directories, shell-free process spawning, atomic state writes, checksum verification, strict download hosts, redirect rejection, bounded streams, conservative orphan-process detection, archive validation, checked backup staging with strict retention ownership, recoverable deletion, and transactional world operations with interrupted-operation guards.
 
 ## Upstream software and licensing
 

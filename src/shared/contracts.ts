@@ -162,6 +162,36 @@ export interface RegenerateWorldInput {
   confirmationName: string
 }
 
+export type BackupIntervalHours = 1 | 3 | 6 | 12 | 24
+export type BackupRetentionCount = 1 | 3 | 5 | 7 | 14
+export type BackupStatus = 'idle' | 'waiting' | 'running' | 'failed'
+
+export interface BackupPolicy {
+  enabled: boolean
+  intervalHours: BackupIntervalHours
+  retentionCount: BackupRetentionCount
+  enabledAt: string
+}
+
+export interface BackupState {
+  instanceId: string
+  policy: BackupPolicy
+  status: BackupStatus
+  lastSuccessfulAt: string | null
+  nextBackupAt: string | null
+  backupCount: number
+  totalBytes: number
+  message: string | null
+  error: string | null
+}
+
+export interface UpdateBackupPolicyInput {
+  instanceId: string
+  enabled: boolean
+  intervalHours: BackupIntervalHours
+  retentionCount: BackupRetentionCount
+}
+
 export interface PaperPluginInfo {
   fileName: string
   name: string | null
@@ -260,6 +290,10 @@ export interface EmberHostApi {
   deleteInstance: (input: DeleteInstanceInput) => Promise<void>
   getWorldSeed: (id: string) => Promise<WorldSeedState>
   regenerateWorld: (input: RegenerateWorldInput) => Promise<WorldSeedState>
+  getBackupState: (id: string) => Promise<BackupState>
+  updateBackupPolicy: (input: UpdateBackupPolicyInput) => Promise<BackupState>
+  createBackupNow: (id: string) => Promise<BackupState>
+  openBackupsFolder: (id: string) => Promise<void>
   startInstance: (id: string) => Promise<InstanceView>
   stopInstance: (id: string) => Promise<InstanceView>
   sendCommand: (id: string, command: string) => Promise<void>
@@ -286,4 +320,5 @@ export interface EmberHostApi {
   onStateChange: (listener: (event: StateEvent) => void) => () => void
   onWorldPreparationChange: (listener: (state: WorldPreparationState) => void) => () => void
   onForceLoadedRegionsChange: (listener: (state: ForceLoadedRegionsState) => void) => () => void
+  onBackupStateChange: (listener: (state: BackupState) => void) => () => void
 }

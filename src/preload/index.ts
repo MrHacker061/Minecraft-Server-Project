@@ -3,6 +3,7 @@ import { channels } from '../shared/channels'
 import type {
   AppSettings,
   AddForceLoadedRegionInput,
+  BackupState,
   CatalogPluginInstallInput,
   ConsoleEntry,
   CreateInstanceInput,
@@ -16,6 +17,7 @@ import type {
   StartWorldPreparationInput,
   StateEvent,
   UpdateInstanceInput,
+  UpdateBackupPolicyInput,
   WorldPreparationState
 } from '../shared/contracts'
 
@@ -33,6 +35,10 @@ const api: EmberHostApi = {
   deleteInstance: (input: DeleteInstanceInput) => ipcRenderer.invoke(channels.deleteInstance, input),
   getWorldSeed: (id: string) => ipcRenderer.invoke(channels.getWorldSeed, id),
   regenerateWorld: (input: RegenerateWorldInput) => ipcRenderer.invoke(channels.regenerateWorld, input),
+  getBackupState: (id: string) => ipcRenderer.invoke(channels.getBackupState, id),
+  updateBackupPolicy: (input: UpdateBackupPolicyInput) => ipcRenderer.invoke(channels.updateBackupPolicy, input),
+  createBackupNow: (id: string) => ipcRenderer.invoke(channels.createBackupNow, id),
+  openBackupsFolder: (id: string) => ipcRenderer.invoke(channels.openBackupsFolder, id),
   startInstance: (id: string) => ipcRenderer.invoke(channels.startInstance, id),
   stopInstance: (id: string) => ipcRenderer.invoke(channels.stopInstance, id),
   sendCommand: (id: string, command: string) => ipcRenderer.invoke(channels.command, { id, command }),
@@ -78,6 +84,11 @@ const api: EmberHostApi = {
     const callback = (_event: Electron.IpcRendererEvent, state: ForceLoadedRegionsState): void => listener(state)
     ipcRenderer.on(channels.forceLoadedRegionsChange, callback)
     return () => ipcRenderer.removeListener(channels.forceLoadedRegionsChange, callback)
+  },
+  onBackupStateChange: (listener: (state: BackupState) => void) => {
+    const callback = (_event: Electron.IpcRendererEvent, state: BackupState): void => listener(state)
+    ipcRenderer.on(channels.backupStateChange, callback)
+    return () => ipcRenderer.removeListener(channels.backupStateChange, callback)
   }
 }
 

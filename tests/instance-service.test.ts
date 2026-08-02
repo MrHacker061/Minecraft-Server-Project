@@ -64,6 +64,7 @@ vi.mock('../src/main/services/chunky', () => ({
 }))
 
 import type { CreateInstanceInput } from '../src/shared/contracts'
+import { BACKUP_MARKER_FILE } from '../src/main/services/backup-safety'
 import { downloadChunky, resolveChunkyForPaper } from '../src/main/services/chunky'
 import { InstanceService } from '../src/main/services/instance-service'
 import { downloadServerJar, resolveRelease } from '../src/main/services/minecraft'
@@ -290,6 +291,34 @@ describe('InstanceService', () => {
       id: instance.id,
       confirmationName: instance.name
     })).rejects.toMatchObject({ code: 'WORLD_REGENERATION_RECOVERY_REQUIRED' })
+    expect(trashItem).not.toHaveBeenCalled()
+  })
+
+  it('preserves the instance when an interrupted automatic backup blocks regeneration and deletion', async () => {
+    const trashItem = vi.fn(async () => undefined)
+    const { store, service } = await harness(trashItem)
+    const instance = await service.create(input, () => undefined)
+    await createWorld(instance.serverDirectory, 'world')
+    await writeFile(join(instance.serverDirectory, BACKUP_MARKER_FILE), `${JSON.stringify({
+      schemaVersion: 1,
+      instanceId: instance.id,
+      stagingName: '.staging-28db97f9-3398-47b5-92c4-aa961d514ca8',
+      restartAfter: false,
+      createdAt: '2026-07-31T00:00:00.000Z'
+    })}\n`, 'utf8')
+
+    await expect(service.regenerateWorld({
+      instanceId: instance.id,
+      seed: 'new-seed',
+      confirmationName: instance.name
+    })).rejects.toMatchObject({ code: 'BACKUP_RECOVERY_REQUIRED' })
+    await expect(service.delete({
+      id: instance.id,
+      confirmationName: instance.name
+    })).rejects.toMatchObject({ code: 'BACKUP_RECOVERY_REQUIRED' })
+
+    expect(store.getInstance(instance.id)).toBeDefined()
+    await expect(access(join(instance.serverDirectory, 'world', 'level.dat'))).resolves.toBeUndefined()
     expect(trashItem).not.toHaveBeenCalled()
   })
 

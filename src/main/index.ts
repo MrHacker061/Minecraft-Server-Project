@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url'
 import { channels } from '../shared/channels'
 import type { AppSettings, LatestVersion } from '../shared/contracts'
 import { AppError, toPublicError } from './services/errors'
+import { BackupService } from './services/backup-service'
 import { InstanceService } from './services/instance-service'
 import { checkJava } from './services/java'
 import { listOfficialReleases, resolveLatestRelease, resolveRelease } from './services/minecraft'
@@ -28,6 +29,7 @@ import {
   removeForceLoadedRegionSchema,
   removePaperPluginSchema,
   regenerateWorldSchema,
+  updateBackupPolicySchema,
   updateInstanceSchema,
   validationMessage
 } from './services/validation'
@@ -48,6 +50,7 @@ let instanceService: InstanceService
 let worldService: WorldService
 let pluginService: PluginService
 let pluginCatalogService: PluginCatalogService
+let backupService: BackupService
 
 if (!gotSingleInstanceLock) app.quit()
 
@@ -304,6 +307,7 @@ function registerIpc(): void {
       throw error
     }
     worldService.completeInstanceDeletion(parsed.id)
+    backupService.forgetInstance(parsed.id)
     try {
       rebuildTrayMenu()
     } catch (error) {
@@ -331,6 +335,26 @@ function registerIpc(): void {
       console.error('The world was regenerated, but the World tools UI could not be reset.', error)
     }
     return result
+  })
+  handle(channels.getBackupState, (_event, id) => {
+    const parsedId = parseOrThrow(instanceIdSchema.safeParse(id))
+    return backupService.getState(parsedId)
+  })
+  handle(channels.updateBackupPolicy, (_event, input) => {
+    assertCanMutate()
+    const parsed = parseOrThrow(updateBackupPolicySchema.safeParse(input))
+    return backupService.updatePolicy(parsed)
+  })
+  handle(channels.createBackupNow, (_event, id) => {
+    assertCanMutate()
+    const parsedId = parseOrThrow(instanceIdSchema.safeParse(id))
+    return backupService.createBackupNow(parsedId)
+  })
+  handle(channels.openBackupsFolder, async (_event, id) => {
+    const parsedId = parseOrThrow(instanceIdSchema.safeParse(id))
+    const directory = await backupService.getBackupsDirectory(parsedId)
+    const result = await shell.openPath(directory)
+    if (result) throw new AppError(result, 'OPEN_FOLDER_FAILED')
   })
   handle(channels.startInstance, async (_event, id) => {
     assertCanMutate()
@@ -454,6 +478,12 @@ async function initialize(): Promise<void> {
   manager = new ServerManager(store)
   instanceService = new InstanceService(store, manager, dataDirectory, moveItemToTrash)
   worldService = new WorldService(store, manager)
+  backupService = new BackupService(
+    store,
+    manager,
+    dataDirectory,
+    (instanceId, operation) => worldService.runBackupOperation(instanceId, operation)
+  )
   pluginService = new PluginService(store, manager, moveItemToTrash)
   pluginCatalogService = new PluginCatalogService(store, manager, pluginService)
   manager.onConsole((entry) => mainWindow?.webContents.send(channels.consoleEntry, entry))
@@ -463,7 +493,9 @@ async function initialize(): Promise<void> {
   })
   worldService.onWorldPreparationChange((state) => mainWindow?.webContents.send(channels.worldPreparationChange, state))
   worldService.onForceLoadedRegionsChange((state) => mainWindow?.webContents.send(channels.forceLoadedRegionsChange, state))
+  backupService.onStateChange((state) => mainWindow?.webContents.send(channels.backupStateChange, state))
   registerIpc()
+  await backupService.initialize()
   createMainWindow()
   createTray()
 }
@@ -475,12 +507,14 @@ app.on('window-all-closed', () => {
 })
 app.on('before-quit', (event) => {
   if (shutdownStarted) return
-  if (manager && instanceService && worldService && store) {
+  if (manager && instanceService && worldService && backupService && store) {
     event.preventDefault()
     isQuitting = true
     shutdownStarted = true
-    manager.beginShutdown()
-    void worldService.awaitIdle()
+    backupService.beginShutdown()
+    void backupService.awaitIdle()
+      .then(() => manager.beginShutdown())
+      .then(() => worldService.awaitIdle())
       .then(() => instanceService.awaitIdle())
       .then(() => manager.shutdownAll())
       .then(() => worldService.awaitIdle())
@@ -489,6 +523,7 @@ app.on('before-quit', (event) => {
       .catch((error: unknown) => {
       shutdownStarted = false
       isQuitting = false
+      backupService.cancelShutdown()
       manager.cancelShutdown()
       showWindow()
       dialog.showErrorBox(
