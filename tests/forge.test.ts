@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { access, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { access, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -254,10 +254,11 @@ describe('Forge installation and launch detection', () => {
     await mkdir(join(directory, 'cache'), { recursive: true })
     await writeFile(installer, bytes)
     await mkdir(staging)
+    const canonicalStaging = await realpath(staging)
     const runner: ForgeInstallerRunner = vi.fn(async (command, args, options) => {
       expect(command).toBe('java-21')
       expect(args).toEqual(['-jar', installer, '--installServer', staging])
-      expect(options).toMatchObject({ cwd: staging, shell: false, windowsHide: true })
+      expect(options).toMatchObject({ cwd: canonicalStaging, shell: false, windowsHide: true })
       const coordinate = join(staging, 'libraries', 'net', 'minecraftforge', 'forge', '1.21.1-52.1.16')
       await mkdir(coordinate, { recursive: true })
       await Promise.all([
