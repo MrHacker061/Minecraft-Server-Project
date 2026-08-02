@@ -137,7 +137,7 @@ async function harness(kind: 'paper' | 'vanilla' = 'paper'): Promise<{
     version: '26.2',
     serverDirectory: join(directory, 'server'),
     software: kind === 'paper' ? { kind: 'paper', build: 87, channel: 'STABLE' } : { kind: 'vanilla' },
-    launchArtifact: kind === 'paper' ? 'paper.jar' : 'server.jar',
+    launch: { kind: 'jar', path: kind === 'paper' ? 'paper.jar' : 'server.jar' },
     jarSha1: kind === 'paper' ? null : '0'.repeat(40),
     artifactSha256: kind === 'paper' ? 'a'.repeat(64) : null,
     requiredJavaVersion: 25,

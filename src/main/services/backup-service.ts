@@ -62,7 +62,7 @@ const automaticManifestSchema = z.object({
   createdAt: z.string().datetime({ offset: true }),
   captureMode: z.enum(['offline', 'offline-maintenance']),
   minecraftVersion: z.string().min(1).max(64),
-  software: z.enum(['vanilla', 'paper']),
+  software: z.enum(['vanilla', 'paper', 'forge']),
   levelName: z.string().min(1).max(128),
   worlds: z.array(manifestWorldSchema).min(1).max(3),
   fileCount: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),

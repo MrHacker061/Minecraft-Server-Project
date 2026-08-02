@@ -1,8 +1,8 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { createWriteStream, type WriteStream } from 'node:fs'
-import { mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { lstat, mkdir, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises'
+import { isAbsolute, join, relative, resolve } from 'node:path'
 import { createConnection } from 'node:net'
 import { createInterface } from 'node:readline'
 import type {
@@ -43,6 +43,7 @@ interface ServerManagerDependencies {
   gracefulStopTimeoutMs: number
   forcedStopTimeoutMs: number
   maintenanceReadinessTimeoutMs: number
+  forgeMaintenanceReadinessTimeoutMs: number
   maintenanceInputWriteTimeoutMs: number
   writeMaintenanceInput: (
     child: ChildProcessWithoutNullStreams,
@@ -90,11 +91,16 @@ const offlineRuntime = (): InstanceRuntime => ({
   }
 })
 
-export function buildLaunchArguments(instance: ServerInstance): string[] {
+export function launchPathForPlatform(instance: ServerInstance, platform = process.platform): string {
+  if (instance.launch.kind === 'jar') return instance.launch.path
+  return platform === 'win32' ? instance.launch.windowsPath : instance.launch.unixPath
+}
+
+export function buildLaunchArguments(instance: ServerInstance, platform = process.platform): string[] {
   const maximumPerformance = instance.software.kind === 'paper' && instance.performancePreset === 'maximum-performance'
   const initialMemory = maximumPerformance
     ? instance.memoryMb
-    : Math.min(instance.software.kind === 'paper' ? 2048 : 1024, instance.memoryMb)
+    : Math.min(instance.software.kind === 'vanilla' ? 1024 : 2048, instance.memoryMb)
   const args = [
     `-Demberhost.instanceId=${instance.id}`,
     `-Xms${initialMemory}M`,
@@ -110,7 +116,9 @@ export function buildLaunchArguments(instance: ServerInstance): string[] {
     )
     if (maximumPerformance) args.push('-XX:+AlwaysPreTouch')
   }
-  args.push('-jar', instance.launchArtifact, 'nogui')
+  const launchPath = launchPathForPlatform(instance, platform)
+  if (instance.launch.kind === 'java-argfile') args.push(`@${launchPath}`, 'nogui')
+  else args.push('-jar', launchPath, 'nogui')
   return args
 }
 
@@ -136,6 +144,7 @@ export class ServerManager {
       gracefulStopTimeoutMs: 30_000,
       forcedStopTimeoutMs: 5_000,
       maintenanceReadinessTimeoutMs: 120_000,
+      forgeMaintenanceReadinessTimeoutMs: 600_000,
       maintenanceInputWriteTimeoutMs: 5_000,
       writeMaintenanceInput: (child, value, callback) => { child.stdin.write(value, callback) },
       spawnProcess: (command, args, options) => spawn(command, args, options),
@@ -409,17 +418,20 @@ export class ServerManager {
           'JAVA_NOT_FOUND'
         )
       }
-      if (java.majorVersion < instance.requiredJavaVersion) {
+      if (
+        java.majorVersion < instance.requiredJavaVersion ||
+        (instance.software.kind === 'forge' && java.majorVersion !== instance.requiredJavaVersion)
+      ) {
         throw new AppError(
-          `Minecraft ${instance.version} needs Java ${instance.requiredJavaVersion}, but Java ${java.majorVersion} was found.`,
-          'JAVA_TOO_OLD'
+          instance.software.kind === 'forge'
+            ? `Forge for Minecraft ${instance.version} needs exactly Java ${instance.requiredJavaVersion}, but Java ${java.majorVersion} was found.`
+            : `Minecraft ${instance.version} needs Java ${instance.requiredJavaVersion}, but Java ${java.majorVersion} was found.`,
+          java.majorVersion < instance.requiredJavaVersion ? 'JAVA_TOO_OLD' : 'JAVA_INCOMPATIBLE'
         )
       }
 
       await mkdir(instance.serverDirectory, { recursive: true })
-      if (!/^[A-Za-z0-9._-]+\.jar$/i.test(instance.launchArtifact)) {
-        throw new AppError('The configured server launch artifact is invalid.', 'INVALID_LAUNCH_ARTIFACT')
-      }
+      await this.assertSafeLaunchTarget(instance)
       const logPath = join(instance.serverDirectory, 'emberhost-console.log')
       await this.rotateLog(logPath)
       if (await this.probePort(instance.port)) {
@@ -462,7 +474,7 @@ export class ServerManager {
         if (managed?.runtime.status === 'starting') {
           this.emitConsole(instanceId, 'system', 'Startup is taking longer than expected. The Java process is still active, but readiness has not been confirmed.', 'warn')
         }
-      }, 90_000)
+      }, instance.software.kind === 'forge' ? 300_000 : 90_000)
       const readinessProbe = setInterval(() => {
         const current = this.processes.get(instanceId)
         if (current?.runtime.status !== 'starting') return
@@ -688,7 +700,9 @@ export class ServerManager {
           'The server did not become ready after its maintenance restart.',
           'MAINTENANCE_RESTART_TIMEOUT'
         ))
-      }, this.dependencies.maintenanceReadinessTimeoutMs)
+      }, this.requireInstance(instanceId).software.kind === 'forge'
+        ? this.dependencies.forgeMaintenanceReadinessTimeoutMs
+        : this.dependencies.maintenanceReadinessTimeoutMs)
       this.stateListeners.add(listener)
       const status = this.runtimes.get(instanceId)?.status
       if (status === 'online') finish()
@@ -834,6 +848,58 @@ export class ServerManager {
       await rename(logPath, previous)
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+    }
+  }
+
+  private async assertSafeLaunchTarget(instance: ServerInstance): Promise<void> {
+    const relativePath = launchPathForPlatform(instance)
+    const parts = relativePath.split('/')
+    const expectedSuffix = instance.launch.kind === 'jar'
+      ? '.jar'
+      : process.platform === 'win32' ? '/win_args.txt' : '/unix_args.txt'
+    if (
+      isAbsolute(relativePath) ||
+      relativePath.includes('\\') ||
+      relativePath.includes(':') ||
+      !relativePath.endsWith(expectedSuffix) ||
+      parts.some((part) => !part || part === '.' || part === '..' || !/^[A-Za-z0-9._-]+$/.test(part))
+    ) {
+      throw new AppError('The configured server launch target is not a safe relative path.', 'INVALID_LAUNCH_ARTIFACT')
+    }
+
+    const serverRoot = resolve(instance.serverDirectory)
+    const rootStats = await lstat(serverRoot).catch((error: unknown) => {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        throw new AppError('The server folder is missing.', 'SERVER_DIRECTORY_MISSING')
+      }
+      throw error
+    })
+    if (!rootStats.isDirectory() || rootStats.isSymbolicLink()) {
+      throw new AppError('The server folder is not a normal local directory.', 'INVALID_LAUNCH_ARTIFACT')
+    }
+
+    let currentPath = serverRoot
+    for (const [index, part] of parts.entries()) {
+      currentPath = join(currentPath, part)
+      const targetStats = await lstat(currentPath).catch((error: unknown) => {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+          throw new AppError('The configured server launch target is missing.', 'INVALID_LAUNCH_ARTIFACT')
+        }
+        throw error
+      })
+      const isFinalPart = index === parts.length - 1
+      if (targetStats.isSymbolicLink() || (isFinalPart ? !targetStats.isFile() : !targetStats.isDirectory())) {
+        throw new AppError(
+          'The configured server launch target is not a normal local file.',
+          'INVALID_LAUNCH_ARTIFACT'
+        )
+      }
+    }
+
+    const [realRoot, realTarget] = await Promise.all([realpath(serverRoot), realpath(currentPath)])
+    const childPath = relative(realRoot, realTarget)
+    if (!childPath || childPath.startsWith('..') || isAbsolute(childPath)) {
+      throw new AppError('The configured server launch target resolves outside the server folder.', 'INVALID_LAUNCH_ARTIFACT')
     }
   }
 

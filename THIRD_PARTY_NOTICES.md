@@ -2,6 +2,22 @@
 
 EmberHost's renderer bundles the following third-party software.
 
+Minecraft server software, MinecraftForge, mods, plugins, and CurseForge content are not bundled with EmberHost. Where supported, a download happens on the user's computer only after the user initiates it, and the downloaded software remains subject to its own license and terms.
+
+## MinecraftForge (downloaded on demand, not bundled)
+
+When a user creates a Forge server, EmberHost reads the official Forge promotions metadata and downloads the selected installer and published checksum sidecars from the official MinecraftForge Maven repository. EmberHost does not redistribute that installer as part of the application.
+
+MinecraftForge is copyright its authors and contributors and is made available under its upstream license. See the [official MinecraftForge source and LGPL-2.1 license](https://github.com/MinecraftForge/MinecraftForge/blob/1.21.x/LICENSE.txt) and the [official Forge downloads](https://files.minecraftforge.net/net/minecraftforge/forge/). The license included with the particular downloaded Forge version controls if it differs from the linked current version.
+
+EmberHost is an independent project and is not affiliated with or endorsed by MinecraftForge.
+
+## CurseForge (integration pending, not bundled)
+
+Version 0.7 does not include a CurseForge API key, live CurseForge catalog client, or automatic CurseForge downloads. A future integration requires approval and a backend that keeps CurseForge's non-disclosable API key out of the desktop application. See the [CurseForge third-party API terms](https://support.curseforge.com/support/solutions/articles/9000207405-curseforge-3rd-party-api-terms-and-conditions) and [API access guidance](https://support.curseforge.com/support/solutions/articles/9000208346-about-the-curseforge-api-and-how-to-apply-for-a-key).
+
+CurseForge names, services, and content remain the property of their respective owners. EmberHost is not affiliated with or endorsed by CurseForge.
+
 ## React and React DOM 19.2.8
 
 MIT License

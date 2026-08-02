@@ -4,10 +4,12 @@ import { isAbsolute, join, relative, resolve } from 'node:path'
 import type {
   CreateInstanceInput,
   DeleteInstanceInput,
+  ForgeBuildInfo,
   InstanceView,
   PaperBuildInfo,
   RegenerateWorldInput,
   ServerInstance,
+  ServerLaunch,
   SetupProgress,
   UpdateInstanceInput,
   WorldSeedState
@@ -15,6 +17,7 @@ import type {
 import { PERFORMANCE_PROFILES } from '../../shared/performance'
 import { downloadChunky, resolveChunkyForPaper, type ResolvedChunkyVersion } from './chunky'
 import { AppError } from './errors'
+import { downloadForgeInstaller, installForgeServer, resolveForgeBuild } from './forge'
 import { checkJava } from './java'
 import { downloadServerJar, resolveRelease } from './minecraft'
 import { downloadPaperJar, resolvePaperBuild } from './paper'
@@ -63,6 +66,7 @@ export class InstanceService {
     onProgress({ phase: 'version', percent: 5, message: `Resolving Minecraft ${input.version}…` })
     const version = await resolveRelease(input.version)
     let paperBuild: PaperBuildInfo | null = null
+    let forgeBuild: ForgeBuildInfo | null = null
     let chunkyVersion: ResolvedChunkyVersion | null = null
     if (softwareSelection.kind === 'paper') {
       onProgress({
@@ -73,6 +77,17 @@ export class InstanceService {
       paperBuild = await resolvePaperBuild(version.id, softwareSelection.build)
       onProgress({ phase: 'plugins', percent: 10, message: `Finding Chunky for Minecraft ${version.id}…` })
       chunkyVersion = await resolveChunkyForPaper(version.id)
+    } else if (softwareSelection.kind === 'forge') {
+      onProgress({
+        phase: 'version',
+        percent: 8,
+        message: `Verifying Forge ${softwareSelection.forgeVersion} for Minecraft ${version.id}…`
+      })
+      forgeBuild = await resolveForgeBuild(
+        version.id,
+        softwareSelection.forgeVersion,
+        softwareSelection.channel
+      )
     }
 
     const selectedJava = input.javaPath || 'java'
@@ -84,49 +99,24 @@ export class InstanceService {
         'JAVA_NOT_FOUND'
       )
     }
-    if (java.majorVersion < version.requiredJavaVersion) {
+    if (
+      java.majorVersion < version.requiredJavaVersion ||
+      (softwareSelection.kind === 'forge' && java.majorVersion !== version.requiredJavaVersion)
+    ) {
       throw new AppError(
-        `Minecraft ${version.id} requires Java ${version.requiredJavaVersion}; the selected runtime is Java ${java.majorVersion}.`,
-        'JAVA_TOO_OLD'
+        softwareSelection.kind === 'forge'
+          ? `Forge for Minecraft ${version.id} requires exactly Java ${version.requiredJavaVersion}; the selected runtime is Java ${java.majorVersion}.`
+          : `Minecraft ${version.id} requires Java ${version.requiredJavaVersion}; the selected runtime is Java ${java.majorVersion}.`,
+        java.majorVersion < version.requiredJavaVersion ? 'JAVA_TOO_OLD' : 'JAVA_INCOMPATIBLE'
       )
     }
 
     const id = randomUUID()
     const finalDirectory = join(this.serversDirectory, id)
     const stagingDirectory = join(this.serversDirectory, `.${id}.staging`)
-    const launchArtifact = softwareSelection.kind === 'paper' ? 'paper.jar' : 'server.jar'
-    const artifactHash = paperBuild?.download.sha256 ?? version.download.sha1
-    const artifact = join(this.artifactsDirectory, `${artifactHash}.jar`)
     const now = new Date().toISOString()
-    const performancePreset = input.performancePreset ?? (paperBuild ? 'balanced' : 'custom')
+    const performancePreset = input.performancePreset ?? (paperBuild || forgeBuild ? 'balanced' : 'custom')
     const profile = performancePreset === 'custom' ? null : PERFORMANCE_PROFILES[performancePreset]
-    const instance: ServerInstance = {
-      id,
-      name: input.name,
-      version: version.id,
-      serverDirectory: finalDirectory,
-      software: paperBuild
-        ? { kind: 'paper', build: paperBuild.build, channel: paperBuild.channel }
-        : { kind: 'vanilla' },
-      launchArtifact,
-      jarSha1: paperBuild ? null : version.download.sha1,
-      artifactSha256: paperBuild?.download.sha256 ?? null,
-      requiredJavaVersion: version.requiredJavaVersion,
-      javaPath: selectedJava,
-      port: input.port,
-      memoryMb: input.memoryMb,
-      maxPlayers: input.maxPlayers,
-      motd: input.motd,
-      gameMode: 'survival',
-      difficulty: 'normal',
-      onlineMode: true,
-      viewDistance: profile?.viewDistance ?? 10,
-      simulationDistance: profile?.simulationDistance ?? 10,
-      performancePreset,
-      eulaAcceptedAt: now,
-      createdAt: now,
-      updatedAt: now
-    }
 
     await mkdir(this.artifactsDirectory, { recursive: true })
     await mkdir(this.serversDirectory, { recursive: true })
@@ -135,8 +125,72 @@ export class InstanceService {
 
     let promoted = false
     try {
-      if (paperBuild) await downloadPaperJar(paperBuild, artifact, onProgress)
-      else await downloadServerJar(version, artifact, onProgress)
+      let launch: ServerLaunch
+      if (paperBuild) {
+        const artifact = join(this.artifactsDirectory, `${paperBuild.download.sha256}.jar`)
+        await downloadPaperJar(paperBuild, artifact, onProgress)
+        await copyFile(artifact, join(stagingDirectory, 'paper.jar'))
+        launch = { kind: 'jar', path: 'paper.jar' }
+      } else if (forgeBuild) {
+        const installer = join(
+          this.artifactsDirectory,
+          `forge-${version.id}-${forgeBuild.forgeVersion}-${forgeBuild.installer.sha1}-installer.jar`
+        )
+        await downloadForgeInstaller(forgeBuild, installer, onProgress)
+        launch = await installForgeServer(
+          forgeBuild,
+          installer,
+          stagingDirectory,
+          {
+            executable: selectedJava,
+            majorVersion: java.majorVersion,
+            requiredMajorVersion: version.requiredJavaVersion
+          },
+          onProgress
+        )
+      } else {
+        const artifact = join(this.artifactsDirectory, `${version.download.sha1}.jar`)
+        await downloadServerJar(version, artifact, onProgress)
+        await copyFile(artifact, join(stagingDirectory, 'server.jar'))
+        launch = { kind: 'jar', path: 'server.jar' }
+      }
+
+      const instance: ServerInstance = {
+        id,
+        name: input.name,
+        version: version.id,
+        serverDirectory: finalDirectory,
+        software: paperBuild
+          ? { kind: 'paper', build: paperBuild.build, channel: paperBuild.channel }
+          : forgeBuild
+            ? {
+                kind: 'forge',
+                forgeVersion: forgeBuild.forgeVersion,
+                mavenVersion: forgeBuild.mavenVersion,
+                channel: forgeBuild.channel,
+                installerSha1: forgeBuild.installer.sha1
+              }
+            : { kind: 'vanilla' },
+        launch,
+        jarSha1: paperBuild || forgeBuild ? null : version.download.sha1,
+        artifactSha256: paperBuild?.download.sha256 ?? null,
+        requiredJavaVersion: version.requiredJavaVersion,
+        javaPath: selectedJava,
+        port: input.port,
+        memoryMb: input.memoryMb,
+        maxPlayers: input.maxPlayers,
+        motd: input.motd,
+        gameMode: 'survival',
+        difficulty: 'normal',
+        onlineMode: true,
+        viewDistance: profile?.viewDistance ?? 10,
+        simulationDistance: profile?.simulationDistance ?? 10,
+        performancePreset,
+        eulaAcceptedAt: now,
+        createdAt: now,
+        updatedAt: now
+      }
+
       let chunkyArtifact: string | null = null
       if (chunkyVersion) {
         chunkyArtifact = join(this.artifactsDirectory, `chunky-${chunkyVersion.file.sha512}.jar`)
@@ -155,7 +209,6 @@ export class InstanceService {
       }
       onProgress({ phase: 'files', percent: 90, message: 'Creating your server files…' })
       await Promise.all([
-        copyFile(artifact, join(stagingDirectory, launchArtifact)),
         writeFile(
           join(stagingDirectory, 'eula.txt'),
           `# Accepted through EmberHost on ${now}\n# ${'https://www.minecraft.net/en-us/eula'}\neula=true\n`,
@@ -498,10 +551,15 @@ export class InstanceService {
     if (!java.available || java.majorVersion === null) {
       throw new AppError('The selected Java executable could not be started.', 'JAVA_NOT_FOUND')
     }
-    if (java.majorVersion < current.requiredJavaVersion) {
+    if (
+      java.majorVersion < current.requiredJavaVersion ||
+      (current.software.kind === 'forge' && java.majorVersion !== current.requiredJavaVersion)
+    ) {
       throw new AppError(
-        `Minecraft ${current.version} requires Java ${current.requiredJavaVersion}; the selected runtime is Java ${java.majorVersion}.`,
-        'JAVA_TOO_OLD'
+        current.software.kind === 'forge'
+          ? `Forge for Minecraft ${current.version} requires exactly Java ${current.requiredJavaVersion}; the selected runtime is Java ${java.majorVersion}.`
+          : `Minecraft ${current.version} requires Java ${current.requiredJavaVersion}; the selected runtime is Java ${java.majorVersion}.`,
+        java.majorVersion < current.requiredJavaVersion ? 'JAVA_TOO_OLD' : 'JAVA_INCOMPATIBLE'
       )
     }
 

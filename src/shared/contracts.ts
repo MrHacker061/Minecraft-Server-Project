@@ -22,15 +22,27 @@ export type ServerStatus = 'offline' | 'starting' | 'online' | 'stopping' | 'cra
 export type GameMode = 'survival' | 'creative' | 'adventure' | 'spectator'
 export type Difficulty = 'peaceful' | 'easy' | 'normal' | 'hard'
 export type PerformancePreset = 'balanced' | 'far-view' | 'maximum-performance' | 'custom'
-export type ServerSoftwareKind = 'vanilla' | 'paper'
+export type ServerSoftwareKind = 'vanilla' | 'paper' | 'forge'
+
+export type ServerLaunch =
+  | { kind: 'jar'; path: string }
+  | { kind: 'java-argfile'; windowsPath: string; unixPath: string }
 
 export type ServerSoftware =
   | { kind: 'vanilla' }
   | { kind: 'paper'; build: number; channel: string }
+  | {
+      kind: 'forge'
+      forgeVersion: string
+      mavenVersion: string
+      channel: 'recommended' | 'latest' | 'exact'
+      installerSha1: string
+    }
 
 export type ServerSoftwareSelection =
   | { kind: 'vanilla' }
   | { kind: 'paper'; build: number }
+  | { kind: 'forge'; forgeVersion: string; channel: 'recommended' | 'latest' | 'exact' }
 
 export interface PaperBuildDownload {
   name: string
@@ -47,13 +59,25 @@ export interface PaperBuildInfo {
   download: PaperBuildDownload
 }
 
+export interface ForgeBuildInfo {
+  minecraftVersion: string
+  forgeVersion: string
+  mavenVersion: string
+  channel: 'recommended' | 'latest' | 'exact'
+  installer: {
+    name: string
+    sha1: string
+    url: string
+  }
+}
+
 export interface ServerInstance {
   id: string
   name: string
   version: string
   serverDirectory: string
   software: ServerSoftware
-  launchArtifact: string
+  launch: ServerLaunch
   jarSha1: string | null
   artifactSha256: string | null
   requiredJavaVersion: number
@@ -126,6 +150,8 @@ export interface BootstrapData {
   versionLookupError: string | null
   latestPaperBuild: PaperBuildInfo | null
   paperLookupError: string | null
+  preferredForgeBuild: ForgeBuildInfo | null
+  forgeLookupError: string | null
   platform: 'win32' | 'darwin' | 'linux' | string
   appVersion: string
   totalMemoryMb: number
@@ -204,6 +230,31 @@ export interface PaperPluginInfo {
   catalogVersionId?: string | null
 }
 
+export interface ForgeModInfo {
+  fileName: string
+  sizeBytes: number
+  sha256: string
+  installedAt: string | null
+  managed: boolean
+}
+
+export interface ForgeModInstallResult {
+  canceled: boolean
+  installed: ForgeModInfo | null
+  mods: ForgeModInfo[]
+}
+
+export interface ForgeModDirectoryImportResult {
+  canceled: boolean
+  importedCount: number
+  mods: ForgeModInfo[]
+}
+
+export interface RemoveForgeModInput {
+  instanceId: string
+  fileName: string
+}
+
 export interface PluginInstallResult {
   canceled: boolean
   installed: PaperPluginInfo | null
@@ -255,7 +306,7 @@ export interface UpdateInstanceInput {
 }
 
 export interface SetupProgress {
-  phase: 'java' | 'version' | 'download' | 'plugins' | 'files' | 'ready'
+  phase: 'java' | 'version' | 'download' | 'loader' | 'plugins' | 'mods' | 'files' | 'ready'
   percent: number
   message: string
   bytesReceived?: number
@@ -284,6 +335,7 @@ export interface EmberHostApi {
   getMinecraftReleases: () => Promise<MinecraftReleaseInfo[]>
   getMinecraftRelease: (minecraftVersion: string) => Promise<LatestVersion>
   getLatestPaperBuild: (minecraftVersion: string) => Promise<PaperBuildInfo>
+  getPreferredForgeBuild: (minecraftVersion: string) => Promise<ForgeBuildInfo>
   checkJava: (javaPath?: string) => Promise<JavaStatus>
   createInstance: (input: CreateInstanceInput) => Promise<InstanceView>
   updateInstance: (input: UpdateInstanceInput) => Promise<InstanceView>
@@ -315,6 +367,12 @@ export interface EmberHostApi {
   getPaperPluginCatalog: (id: string) => Promise<CatalogPaperPlugin[]>
   installCatalogPaperPlugin: (input: CatalogPluginInstallInput) => Promise<PaperPluginInfo[]>
   openPaperPluginPage: (projectId: string) => Promise<void>
+  getForgeMods: (id: string) => Promise<ForgeModInfo[]>
+  chooseForgeMod: (id: string) => Promise<ForgeModInstallResult>
+  chooseForgeModsDirectory: (id: string) => Promise<ForgeModDirectoryImportResult>
+  removeForgeMod: (input: RemoveForgeModInput) => Promise<ForgeModInfo[]>
+  openForgeModsFolder: (id: string) => Promise<void>
+  openCurseForge: () => Promise<void>
   onSetupProgress: (listener: (progress: SetupProgress) => void) => () => void
   onConsoleEntry: (listener: (entry: ConsoleEntry) => void) => () => void
   onStateChange: (listener: (event: StateEvent) => void) => () => void

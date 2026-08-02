@@ -5,7 +5,7 @@ import { join, resolve } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import type { ConsoleEntry, ServerInstance, StateEvent } from '../src/shared/contracts'
 import { BACKUP_MARKER_FILE } from '../src/main/services/backup-safety'
-import { ServerManager } from '../src/main/services/server-manager'
+import { buildLaunchArguments, ServerManager } from '../src/main/services/server-manager'
 import { AppStore } from '../src/main/services/store'
 
 const temporaryDirectories: string[] = []
@@ -50,6 +50,7 @@ async function createHarness(readinessDelayMs = 50, harnessOptions: {
   temporaryDirectories.push(directory)
   const serverDirectory = join(directory, 'server')
   await mkdir(serverDirectory, { recursive: true })
+  await writeFile(join(serverDirectory, 'paper.jar'), 'test launch artifact', 'utf8')
   const store = new AppStore(join(directory, 'config'))
   await store.load()
   const instance: ServerInstance = {
@@ -58,7 +59,7 @@ async function createHarness(readinessDelayMs = 50, harnessOptions: {
     version: '26.2',
     serverDirectory,
     software: { kind: 'paper', build: 87, channel: 'STABLE' },
-    launchArtifact: 'paper.jar',
+    launch: { kind: 'jar', path: 'paper.jar' },
     jarSha1: null,
     artifactSha256: 'b'.repeat(64),
     requiredJavaVersion: 25,
@@ -142,11 +143,64 @@ async function startOnline(manager: ServerManager, instanceId: string): Promise<
 }
 
 describe('ServerManager', () => {
+  it('launches modern Forge through the platform argument file without executing generated scripts', () => {
+    const forgeInstance: ServerInstance = {
+      id: '6387e349-33aa-4c29-a6a9-f5d76fdf8b4f',
+      name: 'Modded world',
+      version: '1.21.1',
+      serverDirectory: 'C:\\server',
+      software: {
+        kind: 'forge',
+        forgeVersion: '52.1.16',
+        mavenVersion: '1.21.1-52.1.16',
+        channel: 'latest',
+        installerSha1: 'a'.repeat(40)
+      },
+      launch: {
+        kind: 'java-argfile',
+        windowsPath: 'libraries/net/minecraftforge/forge/1.21.1-52.1.16/win_args.txt',
+        unixPath: 'libraries/net/minecraftforge/forge/1.21.1-52.1.16/unix_args.txt'
+      },
+      jarSha1: null,
+      artifactSha256: null,
+      requiredJavaVersion: 21,
+      javaPath: 'java',
+      port: 25565,
+      memoryMb: 6144,
+      maxPlayers: 20,
+      motd: 'Forge',
+      gameMode: 'survival',
+      difficulty: 'normal',
+      onlineMode: true,
+      viewDistance: 10,
+      simulationDistance: 10,
+      performancePreset: 'custom',
+      eulaAcceptedAt: '2026-08-01T00:00:00.000Z',
+      createdAt: '2026-08-01T00:00:00.000Z',
+      updatedAt: '2026-08-01T00:00:00.000Z'
+    }
+
+    const windowsArgs = buildLaunchArguments(forgeInstance, 'win32')
+    const unixArgs = buildLaunchArguments(forgeInstance, 'linux')
+    expect(windowsArgs).toContain('-Xms2048M')
+    expect(windowsArgs.slice(-2)).toEqual([
+      '@libraries/net/minecraftforge/forge/1.21.1-52.1.16/win_args.txt',
+      'nogui'
+    ])
+    expect(unixArgs.slice(-2)).toEqual([
+      '@libraries/net/minecraftforge/forge/1.21.1-52.1.16/unix_args.txt',
+      'nogui'
+    ])
+    expect(windowsArgs.join(' ')).not.toContain('run.bat')
+    expect(unixArgs.join(' ')).not.toContain('run.sh')
+  })
+
   it('starts, reaches readiness, sends a command, and stops gracefully', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'emberhost-manager-'))
     temporaryDirectories.push(directory)
     const serverDirectory = join(directory, 'server')
     await mkdir(serverDirectory, { recursive: true })
+    await writeFile(join(serverDirectory, 'paper.jar'), 'test launch artifact', 'utf8')
     const store = new AppStore(join(directory, 'config'))
     await store.load()
     const instance: ServerInstance = {
@@ -155,7 +209,7 @@ describe('ServerManager', () => {
       version: '26.2',
       serverDirectory,
       software: { kind: 'paper', build: 87, channel: 'STABLE' },
-      launchArtifact: 'paper.jar',
+      launch: { kind: 'jar', path: 'paper.jar' },
       jarSha1: null,
       artifactSha256: 'a'.repeat(64),
       requiredJavaVersion: 25,

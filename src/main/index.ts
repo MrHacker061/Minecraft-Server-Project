@@ -9,11 +9,13 @@ import { AppError, toPublicError } from './services/errors'
 import { BackupService } from './services/backup-service'
 import { InstanceService } from './services/instance-service'
 import { checkJava } from './services/java'
+import { resolvePreferredForgeBuild } from './services/forge'
 import { listOfficialReleases, resolveLatestRelease, resolveRelease } from './services/minecraft'
 import { resolveLatestPaperBuild } from './services/paper'
 import { getLanAddresses } from './services/network'
 import { catalogPluginPageUrl, PluginCatalogService } from './services/plugin-catalog'
 import { PluginService } from './services/plugin-service'
+import { ModService } from './services/mod-service'
 import { ServerManager } from './services/server-manager'
 import { AppStore } from './services/store'
 import { validateForceLoadedRegionInput, validateWorldPreparationInput, WorldService } from './services/world-service'
@@ -27,6 +29,7 @@ import {
   instanceIdSchema,
   minecraftVersionSchema,
   removeForceLoadedRegionSchema,
+  removeForgeModSchema,
   removePaperPluginSchema,
   regenerateWorldSchema,
   updateBackupPolicySchema,
@@ -50,6 +53,7 @@ let instanceService: InstanceService
 let worldService: WorldService
 let pluginService: PluginService
 let pluginCatalogService: PluginCatalogService
+let modService: ModService
 let backupService: BackupService
 
 if (!gotSingleInstanceLock) app.quit()
@@ -166,7 +170,9 @@ function rebuildTrayMenu(): void {
       {
         label: instance.software.kind === 'paper'
           ? `Paper ${instance.version} build ${instance.software.build}`
-          : `Vanilla Minecraft ${instance.version}`,
+          : instance.software.kind === 'forge'
+            ? `Forge ${instance.version} (${instance.software.forgeVersion})`
+            : `Vanilla Minecraft ${instance.version}`,
         enabled: false
       }
     ]
@@ -241,11 +247,19 @@ function registerIpc(): void {
           requiredJavaVersion: versionResult.version.requiredJavaVersion
         }
       : null
-    const paperResult = latestVersion
-      ? await resolveLatestPaperBuild(latestVersion.id)
-          .then((build) => ({ build, error: null }))
-          .catch((error: unknown) => ({ build: null, error: error instanceof Error ? error.message : 'Paper lookup failed.' }))
-      : { build: null, error: 'Paper requires a resolved Minecraft release.' }
+    const [paperResult, forgeResult] = latestVersion
+      ? await Promise.all([
+          resolveLatestPaperBuild(latestVersion.id)
+            .then((build) => ({ build, error: null }))
+            .catch((error: unknown) => ({ build: null, error: error instanceof Error ? error.message : 'Paper lookup failed.' })),
+          resolvePreferredForgeBuild(latestVersion.id)
+            .then((build) => ({ build, error: null }))
+            .catch((error: unknown) => ({ build: null, error: error instanceof Error ? error.message : 'Forge lookup failed.' }))
+        ])
+      : [
+          { build: null, error: 'Paper requires a resolved Minecraft release.' },
+          { build: null, error: 'Forge requires a resolved Minecraft release.' }
+        ]
     return {
       instances: manager.listViews(),
       settings: store.getSettings(),
@@ -254,6 +268,8 @@ function registerIpc(): void {
       versionLookupError: versionResult.error,
       latestPaperBuild: paperResult.build,
       paperLookupError: paperResult.error,
+      preferredForgeBuild: forgeResult.build,
+      forgeLookupError: forgeResult.error,
       platform: process.platform,
       appVersion: app.getVersion(),
       totalMemoryMb: Math.round(totalmem() / 1024 / 1024),
@@ -277,6 +293,10 @@ function registerIpc(): void {
   handle(channels.latestPaperBuild, async (_event, minecraftVersion) => {
     if (typeof minecraftVersion !== 'string') throw new AppError('Invalid Minecraft version.', 'VALIDATION_ERROR')
     return resolveLatestPaperBuild(minecraftVersion)
+  })
+  handle(channels.preferredForgeBuild, async (_event, minecraftVersion) => {
+    const id = parseOrThrow(minecraftVersionSchema.safeParse(minecraftVersion))
+    return resolvePreferredForgeBuild(id)
   })
   handle(channels.checkJava, async (_event, javaPath) => {
     if (javaPath !== undefined && typeof javaPath !== 'string') throw new AppError('Invalid Java path.', 'VALIDATION_ERROR')
@@ -469,6 +489,62 @@ function registerIpc(): void {
     const parsedProjectId = parseOrThrow(catalogProjectIdSchema.safeParse(projectId))
     return shell.openExternal(catalogPluginPageUrl(parsedProjectId))
   })
+  handle(channels.getForgeMods, (_event, id) => {
+    const parsedId = parseOrThrow(instanceIdSchema.safeParse(id))
+    return modService.list(parsedId)
+  })
+  handle(channels.chooseForgeMod, async (_event, id) => {
+    assertCanMutate()
+    const parsedId = parseOrThrow(instanceIdSchema.safeParse(id))
+    const mods = await modService.list(parsedId)
+    if (manager.isActive(parsedId)) {
+      throw new AppError('Stop the Forge server before changing its mods.', 'SERVER_MUST_BE_STOPPED')
+    }
+    if (!mainWindow || mainWindow.isDestroyed()) throw new AppError('The EmberHost window is unavailable.', 'WINDOW_UNAVAILABLE')
+    const choice = await dialog.showOpenDialog(mainWindow, {
+      title: 'Choose a Forge mod JAR',
+      properties: ['openFile'],
+      filters: [{ name: 'Minecraft mod JAR', extensions: ['jar'] }]
+    })
+    if (choice.canceled || !choice.filePaths[0]) return { canceled: true, installed: null, mods }
+    assertCanMutate()
+    const sourcePath = choice.filePaths[0]
+    const updated = await modService.installFromPath(parsedId, sourcePath)
+    const sourceName = basename(sourcePath)
+    const installed = updated.find((mod) => mod.fileName.toLowerCase() === sourceName.toLowerCase()) ?? null
+    return { canceled: false, installed, mods: updated }
+  })
+  handle(channels.chooseForgeModsDirectory, async (_event, id) => {
+    assertCanMutate()
+    const parsedId = parseOrThrow(instanceIdSchema.safeParse(id))
+    const mods = await modService.list(parsedId)
+    if (manager.isActive(parsedId)) {
+      throw new AppError('Stop the Forge server before importing a mods folder.', 'SERVER_MUST_BE_STOPPED')
+    }
+    if (!mainWindow || mainWindow.isDestroyed()) throw new AppError('The EmberHost window is unavailable.', 'WINDOW_UNAVAILABLE')
+    const choice = await dialog.showOpenDialog(mainWindow, {
+      title: "Choose the extracted server pack's mods folder",
+      properties: ['openDirectory']
+    })
+    if (choice.canceled || !choice.filePaths[0]) return { canceled: true, importedCount: 0, mods }
+    assertCanMutate()
+    const updated = await modService.importFromDirectory(parsedId, choice.filePaths[0])
+    return { canceled: false, importedCount: Math.max(0, updated.length - mods.length), mods: updated }
+  })
+  handle(channels.removeForgeMod, (_event, input) => {
+    assertCanMutate()
+    const parsed = parseOrThrow(removeForgeModSchema.safeParse(input))
+    return modService.remove(parsed.instanceId, parsed.fileName)
+  })
+  handle(channels.openForgeModsFolder, async (_event, id) => {
+    const parsedId = parseOrThrow(instanceIdSchema.safeParse(id))
+    await modService.list(parsedId)
+    const instance = store.getInstance(parsedId)
+    if (!instance) throw new AppError('That server no longer exists.', 'INSTANCE_NOT_FOUND')
+    const result = await shell.openPath(join(instance.serverDirectory, 'mods'))
+    if (result) throw new AppError(result, 'OPEN_FOLDER_FAILED')
+  })
+  handle(channels.openCurseForge, () => shell.openExternal('https://www.curseforge.com/minecraft/modpacks'))
 }
 
 async function initialize(): Promise<void> {
@@ -486,6 +562,7 @@ async function initialize(): Promise<void> {
   )
   pluginService = new PluginService(store, manager, moveItemToTrash)
   pluginCatalogService = new PluginCatalogService(store, manager, pluginService)
+  modService = new ModService(store, manager, moveItemToTrash)
   manager.onConsole((entry) => mainWindow?.webContents.send(channels.consoleEntry, entry))
   manager.onState((event) => {
     mainWindow?.webContents.send(channels.stateChange, event)

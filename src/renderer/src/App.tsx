@@ -57,6 +57,8 @@ import type {
   ConsoleEntry,
   CreateInstanceInput,
   ForceLoadedRegionsState,
+  ForgeBuildInfo,
+  ForgeModInfo,
   InstanceView,
   LatestVersion,
   MinecraftReleaseInfo,
@@ -77,7 +79,7 @@ type ViewName = 'overview' | 'world' | 'plugins' | 'console' | 'settings'
 type Toast = { id: number; kind: 'success' | 'error' | 'info'; message: string }
 type RegenerationTarget = { instance: InstanceView; seed: string }
 
-type PaperCreateInput = CreateInstanceInput & {
+type ServerCreateInput = CreateInstanceInput & {
   software: ServerSoftwareSelection
   performancePreset: Exclude<PerformancePreset, 'custom'>
 }
@@ -130,6 +132,18 @@ function BrandMark({ large = false }: { large?: boolean }): React.JSX.Element {
 
 function instanceSoftware(instance: InstanceView): ServerSoftwareSelection {
   return instance.software
+}
+
+function softwareName(instance: InstanceView): string {
+  if (instance.software.kind === 'paper') return `Paper build ${instance.software.build}`
+  if (instance.software.kind === 'forge') return `Forge ${instance.software.forgeVersion}`
+  return 'Vanilla'
+}
+
+function softwareIcon(instance: InstanceView, size = 18): React.JSX.Element {
+  if (instance.software.kind === 'paper') return <Rocket size={size} />
+  if (instance.software.kind === 'forge') return <Layers3 size={size} />
+  return <Server size={size} />
 }
 
 const statusLabels: Record<ServerStatus, string> = {
@@ -241,7 +255,7 @@ interface SetupProps {
   creating: boolean
   error: string | null
   onClose: () => void
-  onCreate: (input: PaperCreateInput) => Promise<void>
+  onCreate: (input: ServerCreateInput) => Promise<void>
 }
 
 function CreateServerDialog({ bootstrap, canClose, progress, creating, error, onClose, onCreate }: SetupProps): React.JSX.Element {
@@ -255,16 +269,20 @@ function CreateServerDialog({ bootstrap, canClose, progress, creating, error, on
   const [maxPlayers, setMaxPlayers] = useState(20)
   const [javaPath, setJavaPath] = useState(bootstrap.java.command || 'java')
   const [eulaAccepted, setEulaAccepted] = useState(false)
-  const [software, setSoftware] = useState<'paper' | 'vanilla'>('paper')
+  const [software, setSoftware] = useState<'paper' | 'vanilla' | 'forge'>('paper')
   const [performancePreset, setPerformancePreset] = useState<Exclude<PerformancePreset, 'custom'>>('balanced')
   const [releases, setReleases] = useState<MinecraftReleaseInfo[]>([])
   const [selectedVersionId, setSelectedVersionId] = useState(bootstrap.latestVersion?.id ?? '')
   const [selectedVersion, setSelectedVersion] = useState<LatestVersion | null>(bootstrap.latestVersion)
   const [paperBuild, setPaperBuild] = useState<PaperBuildInfo | null>(bootstrap.latestPaperBuild)
+  const [forgeBuild, setForgeBuild] = useState<ForgeBuildInfo | null>(bootstrap.preferredForgeBuild)
   const [releaseListError, setReleaseListError] = useState<string | null>(null)
   const [releaseError, setReleaseError] = useState<string | null>(null)
   const [paperError, setPaperError] = useState<string | null>(bootstrap.paperLookupError)
+  const [forgeError, setForgeError] = useState<string | null>(bootstrap.forgeLookupError)
   const [versionLoading, setVersionLoading] = useState(false)
+  const [paperLoading, setPaperLoading] = useState(false)
+  const [forgeLoading, setForgeLoading] = useState(false)
   const releaseRequest = useRef(0)
 
   const loadReleases = async (): Promise<void> => {
@@ -282,29 +300,46 @@ function CreateServerDialog({ bootstrap, canClose, progress, creating, error, on
     if (!id) return
     const request = ++releaseRequest.current
     setVersionLoading(true)
+    setPaperLoading(true)
+    setForgeLoading(true)
     setSelectedVersion(null)
     setReleaseError(null)
     setPaperError(null)
+    setForgeError(null)
     setPaperBuild(null)
+    setForgeBuild(null)
     try {
       const release = await window.emberHost.getMinecraftRelease(id)
       if (request !== releaseRequest.current) return
       setSelectedVersion(release)
       setVersionLoading(false)
-      try {
-        const build = await window.emberHost.getLatestPaperBuild(id)
+      void window.emberHost.getLatestPaperBuild(id).then((build) => {
         if (request !== releaseRequest.current) return
         setPaperBuild(build)
-      } catch (lookupError) {
+      }).catch((lookupError) => {
         if (request !== releaseRequest.current) return
         setPaperError(friendlyError(lookupError))
-        setSoftware('vanilla')
-      }
+        setSoftware((current) => current === 'paper' ? 'vanilla' : current)
+      }).finally(() => {
+        if (request === releaseRequest.current) setPaperLoading(false)
+      })
+      void window.emberHost.getPreferredForgeBuild(id).then((build) => {
+        if (request !== releaseRequest.current) return
+        setForgeBuild(build)
+      }).catch((lookupError) => {
+        if (request !== releaseRequest.current) return
+        setForgeError(friendlyError(lookupError))
+        setSoftware((current) => current === 'forge' ? 'vanilla' : current)
+      }).finally(() => {
+        if (request === releaseRequest.current) setForgeLoading(false)
+      })
     } catch (lookupError) {
       if (request !== releaseRequest.current) return
       setSelectedVersion(null)
       setReleaseError(friendlyError(lookupError))
       setSoftware('vanilla')
+      setPaperLoading(false)
+      setForgeLoading(false)
     } finally {
       if (request === releaseRequest.current) setVersionLoading(false)
     }
@@ -313,7 +348,7 @@ function CreateServerDialog({ bootstrap, canClose, progress, creating, error, on
   useEffect(() => { void loadReleases() }, [])
   useEffect(() => { void loadSelectedRelease(selectedVersionId) }, [selectedVersionId])
 
-  const softwareReady = software === 'vanilla' || paperBuild !== null && paperBuild !== undefined
+  const softwareReady = software === 'vanilla' || (software === 'paper' && paperBuild !== null) || (software === 'forge' && forgeBuild !== null)
   const stepValid = step === 0 ? name.trim().length > 0 && motd.trim().length > 0 && softwareReady && selectedVersion !== null && !versionLoading : step === 1
     ? memoryMb >= 1024 && port >= 1024 && port <= 65535 && maxPlayers >= 1
     : eulaAccepted && selectedVersion !== null
@@ -329,7 +364,9 @@ function CreateServerDialog({ bootstrap, canClose, progress, creating, error, on
     if (!version) return
     const selectedSoftware: ServerSoftwareSelection = software === 'paper' && paperBuild
       ? { kind: 'paper', build: paperBuild.build }
-      : { kind: 'vanilla' }
+      : software === 'forge' && forgeBuild
+        ? { kind: 'forge', forgeVersion: forgeBuild.forgeVersion, channel: forgeBuild.channel }
+        : { kind: 'vanilla' }
     await onCreate({
       name: name.trim(),
       version,
@@ -360,7 +397,7 @@ function CreateServerDialog({ bootstrap, canClose, progress, creating, error, on
           <div className="setup-copy">
             <span className="eyebrow"><Sparkles size={14} /> Quick setup</span>
             <h2 id="setup-title">Build a world that stays yours.</h2>
-            <p>Choose optimized Paper or official Vanilla, then keep the whole world running from this computer.</p>
+            <p>Choose optimized Paper, moddable Forge, or official Vanilla, then keep the whole world running from this computer.</p>
           </div>
           <ol className="step-list">
             {['Server basics', 'Performance & network', 'Review & create'].map((label, index) => (
@@ -380,8 +417,8 @@ function CreateServerDialog({ bootstrap, canClose, progress, creating, error, on
               <label className="field"><span>Message of the day</span><input value={motd} maxLength={120} onChange={(event) => setMotd(event.target.value)} /></label>
               <fieldset className="choice-fieldset software-choices">
                 <legend>Server software</legend>
-                <label className={`choice-card software-card ${software === 'paper' ? 'selected' : ''} ${!paperBuild || versionLoading ? 'disabled' : ''}`}>
-                  <input type="radio" name="software" value="paper" checked={software === 'paper'} disabled={!paperBuild || versionLoading} onChange={() => setSoftware('paper')} />
+                <label className={`choice-card software-card ${software === 'paper' ? 'selected' : ''} ${!paperBuild || paperLoading || versionLoading ? 'disabled' : ''}`}>
+                  <input type="radio" name="software" value="paper" checked={software === 'paper'} disabled={!paperBuild || paperLoading || versionLoading} onChange={() => setSoftware('paper')} />
                   <span className="choice-icon"><Rocket size={20} /></span>
                   <span className="choice-copy"><strong>Paper</strong><small>Faster, configurable, plugin-ready</small></span>
                   <span className="recommended-tag">Recommended</span>
@@ -392,6 +429,12 @@ function CreateServerDialog({ bootstrap, canClose, progress, creating, error, on
                   <span className="choice-icon vanilla"><Server size={20} /></span>
                   <span className="choice-copy"><strong>Vanilla</strong><small>Official, unchanged Minecraft</small></span>
                   <span className="choice-check" aria-hidden="true">{software === 'vanilla' && <Check size={13} />}</span>
+                </label>
+                <label className={`choice-card software-card ${software === 'forge' ? 'selected' : ''} ${!forgeBuild || forgeLoading || versionLoading ? 'disabled' : ''}`}>
+                  <input type="radio" name="software" value="forge" checked={software === 'forge'} disabled={!forgeBuild || forgeLoading || versionLoading} onChange={() => setSoftware('forge')} />
+                  <span className="choice-icon forge"><Layers3 size={20} /></span>
+                  <span className="choice-copy"><strong>Forge</strong><small>Mod loader with local mod support</small></span>
+                  <span className="choice-check" aria-hidden="true">{software === 'forge' && <Check size={13} />}</span>
                 </label>
               </fieldset>
               <div className="release-picker">
@@ -408,12 +451,16 @@ function CreateServerDialog({ bootstrap, canClose, progress, creating, error, on
                   <small>{releaseError ?? (selectedVersion
                     ? software === 'paper' && paperBuild
                       ? `Paper build ${paperBuild.build} · Requires Java ${selectedVersion.requiredJavaVersion}`
-                      : `Official Mojang server · Requires Java ${selectedVersion.requiredJavaVersion}`
+                      : software === 'forge' && forgeBuild
+                        ? `Forge ${forgeBuild.forgeVersion} · ${categoryLabel(forgeBuild.channel)} build · Requires Java ${selectedVersion.requiredJavaVersion}`
+                        : `Official Mojang server · Requires Java ${selectedVersion.requiredJavaVersion}`
                     : bootstrap.versionLookupError ?? 'Choose an official release.')}</small>
-                  {(releaseError || releaseListError) && <button type="button" onClick={() => { void loadReleases(); void loadSelectedRelease(selectedVersionId) }}><RotateCcw size={12} /> Retry lookup</button>}
+                  {(releaseError || releaseListError || paperError || forgeError) && <button type="button" onClick={() => { void loadReleases(); void loadSelectedRelease(selectedVersionId) }}><RotateCcw size={12} /> Retry lookup</button>}
                 </div>
                 {releaseListError && <div className="info-callout warning"><AlertTriangle size={17} /><div><strong>The release list could not refresh.</strong><span>{releaseListError}</span></div></div>}
                 {!versionLoading && paperError && software === 'vanilla' && <div className="info-callout neutral"><Info size={17} /><div><strong>Paper is not available for this release.</strong><span>Vanilla remains available. {paperError}</span></div></div>}
+                {!versionLoading && forgeError && software !== 'forge' && <div className="info-callout neutral"><Info size={17} /><div><strong>Forge is not available for this release.</strong><span>Choose Paper or Vanilla for Minecraft {selectedVersionId}. {forgeError}</span></div></div>}
+                {!versionLoading && software === 'forge' && forgeBuild && <div className="info-callout forge-provenance"><Layers3 size={17} /><div><strong>Forge {forgeBuild.forgeVersion} · {categoryLabel(forgeBuild.channel)}</strong><span>EmberHost uses Forge's published {forgeBuild.channel} build for Minecraft {forgeBuild.minecraftVersion} and verifies the installer before setup.</span></div></div>}
               </div>
             </div>
           )}
@@ -450,7 +497,7 @@ function CreateServerDialog({ bootstrap, canClose, progress, creating, error, on
             <div className="form-page">
               <div className="form-heading"><span>03</span><div><h3>Ready to create</h3><p>One last check before the download begins.</p></div></div>
               <div className="review-card">
-                <div><span>Server</span><strong>{name}</strong></div><div><span>Software</span><strong>{software === 'paper' ? `Paper build ${paperBuild?.build ?? '—'}` : 'Vanilla'}</strong></div>
+                <div><span>Server</span><strong>{name}</strong></div><div><span>Software</span><strong>{software === 'paper' ? `Paper build ${paperBuild?.build ?? '—'}` : software === 'forge' ? `Forge ${forgeBuild?.forgeVersion ?? '—'} (${forgeBuild ? categoryLabel(forgeBuild.channel) : 'Unavailable'})` : 'Vanilla'}</strong></div>
                 <div><span>Release</span><strong>Minecraft {selectedVersion?.id ?? '—'}</strong></div><div><span>Profile</span><strong>{presetOptions.find((preset) => preset.id === performancePreset)?.label}</strong></div>
                 <div><span>Memory</span><strong>{(memoryMb / 1024).toFixed(1)} GB</strong></div><div><span>Address</span><strong>localhost:{port}</strong></div>
                 <div><span>Players</span><strong>Up to {maxPlayers}</strong></div><div><span>Authentication</span><strong>Online mode</strong></div>
@@ -460,7 +507,7 @@ function CreateServerDialog({ bootstrap, canClose, progress, creating, error, on
                 <span className="check-box">{eulaAccepted && <Check size={14} />}</span>
                 <span>I have read and agree to the <button type="button" onClick={(event) => { event.preventDefault(); event.stopPropagation(); void window.emberHost.openEula() }}>Minecraft End User License Agreement <ExternalLink size={12} /></button>.</span>
               </label>
-              <div className="info-callout neutral"><Info size={18} /><div><strong>{software === 'paper' ? 'Paper is built from Mojang’s official server.' : 'The server JAR comes straight from Mojang.'}</strong><span>{software === 'paper' ? 'EmberHost downloads the selected build from PaperMC and verifies it before setup.' : 'EmberHost verifies the official file before placing it in your private server folder.'}</span></div></div>
+              <div className="info-callout neutral"><Info size={18} /><div><strong>{software === 'paper' ? 'Paper is built from Mojang’s official server.' : software === 'forge' ? 'Forge installs a verified mod-loader server.' : 'The server JAR comes straight from Mojang.'}</strong><span>{software === 'paper' ? 'EmberHost downloads the selected build from PaperMC and verifies it before setup.' : software === 'forge' ? `EmberHost downloads Forge ${forgeBuild?.forgeVersion ?? ''} from the official Forge Maven, verifies it, and creates a private mods folder.` : 'EmberHost verifies the official file before placing it in your private server folder.'}</span></div></div>
             </div>
           )}
 
@@ -515,7 +562,8 @@ function Overview({ instance, backupState, address, addressHost, lanAddresses, l
 }): React.JSX.Element {
   const active = instance.runtime.status === 'online' || instance.runtime.status === 'starting'
   const stopping = instance.runtime.status === 'stopping'
-  const paper = instanceSoftware(instance).kind === 'paper'
+  const software = instanceSoftware(instance)
+  const paper = software.kind === 'paper'
   const health = instance.runtime.health
   const memoryUsed = health.memoryUsedMb
   const memoryMax = health.memoryMaxMb ?? instance.memoryMb
@@ -546,7 +594,7 @@ function Overview({ instance, backupState, address, addressHost, lanAddresses, l
       <section className={`hero-card hero-${instance.runtime.status}`}>
         <div className="hero-glow" />
         <div className="hero-main">
-          <div className="hero-badges"><StatusBadge status={instance.runtime.status} large /><span className={`software-badge ${paper ? 'paper' : 'vanilla'}`}>{paper ? <Rocket size={13} /> : <Server size={13} />}{paper ? `Paper build ${instance.software.kind === 'paper' ? instance.software.build : ''}` : 'Vanilla'}</span></div>
+          <div className="hero-badges"><StatusBadge status={instance.runtime.status} large /><span className={`software-badge ${software.kind}`}>{softwareIcon(instance, 13)}{softwareName(instance)}</span></div>
           <h2>{instance.runtime.status === 'online' ? 'Your world is live.' : instance.runtime.status === 'starting' ? 'Warming up your world…' : stopping ? 'Saving and stopping…' : instance.runtime.status === 'crashed' ? 'The last run needs attention.' : 'Ready when you are.'}</h2>
           <p>{connectionDescription}</p>
           <div className="address-pill" data-address={address} title={lanAddresses.length > 1 ? 'Choose a current network address' : 'Current network address'}>
@@ -723,7 +771,7 @@ function WorldToolsView({
       {!paper && (
         <section className="paper-gate" role="note">
           <div className="paper-gate-icon"><Rocket size={25} /></div>
-          <div><span className="eyebrow">Paper feature set</span><h2>Advanced terrain tools need a Paper server.</h2><p>Seed changes and world regeneration work with Vanilla. Create a Paper server to pre-generate terrain, monitor tick health, and safely bound force-loaded regions.</p></div>
+          <div><span className="eyebrow">Paper feature set</span><h2>Advanced terrain tools need a Paper server.</h2><p>Seed changes and world regeneration work with {instance.software.kind === 'forge' ? 'Forge' : 'Vanilla'}. Create a Paper server to pre-generate terrain, monitor tick health, and safely bound force-loaded regions.</p></div>
           <button className="button primary" onClick={onCreatePaper}><Plus size={16} /> New Paper server</button>
         </section>
       )}
@@ -948,6 +996,92 @@ function PluginsView({ instance, plugins, catalog, loading, catalogLoading, busy
   )
 }
 
+function ModsView({ instance, mods, loading, busy, onInstall, onImportDirectory, onRemove, onRefresh, onOpenFolder, onOpenCurseForge }: {
+  instance: InstanceView
+  mods: ForgeModInfo[]
+  loading: boolean
+  busy: boolean
+  onInstall: () => void
+  onImportDirectory: () => void
+  onRemove: (fileName: string) => void
+  onRefresh: () => void
+  onOpenFolder: () => void
+  onOpenCurseForge: () => void
+}): React.JSX.Element {
+  const forge = instance.software.kind === 'forge' ? instance.software : null
+  const active = instance.runtime.status !== 'offline' && instance.runtime.status !== 'crashed'
+  const compatibility = `Minecraft ${instance.version} · Forge ${forge?.forgeVersion ?? 'unknown'}`
+
+  return (
+    <div className="page-content plugins-content mods-content">
+      <section className="plugin-panel curseforge-panel" aria-labelledby="curseforge-title">
+        <div className="curseforge-layout">
+          <div className="curseforge-mark" aria-hidden="true"><Layers3 size={25} /></div>
+          <div className="curseforge-copy">
+            <span className="eyebrow">CurseForge modpacks</span>
+            <h2 id="curseforge-title">Pack import is being built responsibly.</h2>
+            <p>Direct in-app catalog search and downloads await CurseForge API approval. EmberHost does not bundle or expose a developer API key, and this screen does not claim a live CurseForge integration.</p>
+            <div className="curseforge-steps"><span><strong>Available now</strong> Browse CurseForge in your browser, extract a server pack, then select its <code>mods</code> folder.</span><span><strong>Planned</strong> Approved, verified in-app server-pack discovery and import.</span></div>
+          </div>
+          <div className="curseforge-actions">
+            <button type="button" className="button secondary" onClick={onOpenCurseForge}><ExternalLink size={16} /> Browse CurseForge</button>
+            <button type="button" className="button primary" disabled={active || busy} onClick={onImportDirectory}>{busy ? <LoaderCircle className="spin" size={16} /> : <FolderOpen size={16} />} Import mods folder</button>
+          </div>
+        </div>
+        {active && <div className="tool-callout neutral"><Info size={17} /><div><strong>Stop Forge before importing a pack.</strong><span>Mod files are locked while the Java process is active so the next startup loads one consistent set.</span></div></div>}
+      </section>
+
+      <section className="plugin-panel" aria-labelledby="installed-mods-title">
+        <div className="plugin-heading">
+          <div><span className="panel-icon forge-icon"><Layers3 size={19} /></span><div><span className="eyebrow">Installed and local</span><h2 id="installed-mods-title">Forge mods</h2><p>Manage the JAR files loaded by this server's exact Forge installation.</p></div></div>
+          <div className="plugin-heading-actions">
+            <button type="button" className="icon-button" aria-label="Open mods folder" title="Open mods folder" onClick={onOpenFolder}><FolderOpen size={17} /></button>
+            <button type="button" className="icon-button" aria-label="Refresh mod list" title="Refresh mod list" disabled={loading || busy} onClick={onRefresh}><RotateCcw className={loading ? 'spin' : ''} size={17} /></button>
+            <button type="button" className="button primary" disabled={active || busy} onClick={onInstall}>{busy ? <LoaderCircle className="spin" size={16} /> : <PackagePlus size={16} />} Add mod JAR</button>
+          </div>
+        </div>
+
+        <div className="tool-callout danger mod-permission-warning"><ShieldAlert size={17} /><div><strong>Mods execute with your operating-system permissions.</strong><span>A mod runs inside the server's Java process and can access anything that process can access. Install only from authors you trust.</span></div></div>
+        <div className="tool-callout amber"><AlertTriangle size={17} /><div><strong>Every mod must match {compatibility} exactly.</strong><span>Client-required mods must also be installed by each player. Wrong loader or game versions can prevent the server from starting or corrupt a world, so keep backups enabled.</span></div></div>
+        {active && <div className="tool-callout neutral"><Info size={17} /><div><strong>Stop Forge to add or remove mods.</strong><span>Changes take effect the next time the server starts.</span></div></div>}
+
+        <div className="plugin-list mod-list" aria-label="Installed Forge mods" aria-busy={loading}>
+          <div className="plugin-list-title"><div><strong>Installed</strong><span>{mods.length} mod{mods.length === 1 ? '' : 's'}</span></div><span>{compatibility}</span></div>
+          {loading ? (
+            <div className="plugin-empty"><LoaderCircle className="spin" size={25} /><strong>Reading the mods folder…</strong></div>
+          ) : mods.length ? mods.map((mod) => (
+            <article className="plugin-row mod-row" key={mod.fileName}>
+              <span className="plugin-icon mod-icon"><Layers3 size={18} /></span>
+              <div className="plugin-copy"><div><strong>{mod.fileName.replace(/\.jar$/i, '')}</strong>{mod.managed ? <span className="plugin-badge">Managed</span> : <span className="plugin-badge neutral">External</span>}</div><span>{mod.fileName} · {formatBytes(mod.sizeBytes)} · SHA-256 {mod.sha256.slice(0, 12)}…{mod.installedAt ? ` · added ${new Date(mod.installedAt).toLocaleDateString()}` : ''}</span></div>
+              <button type="button" className="button danger compact" disabled={active || busy} title={active ? 'Stop Forge before removing mods.' : 'Move this mod to the recycle bin'} onClick={() => onRemove(mod.fileName)}><Trash2 size={15} /> Remove</button>
+            </article>
+          )) : (
+            <div className="plugin-empty"><Layers3 size={27} /><strong>No mods installed</strong><span>Add one compatible Forge mod JAR, or import the mods folder from an extracted server pack.</span></div>
+          )}
+        </div>
+      </section>
+    </div>
+  )
+}
+
+function ExtensionsGate({ onCreate }: { onCreate: () => void }): React.JSX.Element {
+  return (
+    <div className="page-content plugins-content extensions-content">
+      <section className="extensions-gate">
+        <div className="extensions-gate-icon"><Puzzle size={27} /></div>
+        <span className="eyebrow">Vanilla extensions</span>
+        <h2>This server keeps the official Vanilla experience.</h2>
+        <p>Vanilla servers do not load Paper plugins or Forge mods. Create a separate Paper server for plugins and performance tools, or a Forge server for a modded world.</p>
+        <div className="extension-options">
+          <article><span className="choice-icon"><Rocket size={20} /></span><div><strong>Paper</strong><small>Plugins, performance tuning, and advanced terrain tools.</small></div></article>
+          <article><span className="choice-icon forge"><Layers3 size={20} /></span><div><strong>Forge</strong><small>Local mod JARs and extracted server-pack imports.</small></div></article>
+        </div>
+        <button type="button" className="button primary" onClick={onCreate}><Plus size={16} /> Create an extension-ready server</button>
+      </section>
+    </div>
+  )
+}
+
 function ConsoleView({ instance, logs, onSend }: {
   instance: InstanceView
   logs: ConsoleEntry[]
@@ -1101,7 +1235,7 @@ function SettingsView({ instance, totalMemoryMb, appSettings, backupState, savin
       <section className="settings-section">
         <div className="settings-title"><span><Gauge size={19} /></span><div><h3>Performance & network</h3><p>Changes take effect on the next start.</p></div></div>
         <div className="settings-fields">
-          <div className="software-summary"><span className={`choice-icon ${instance.software.kind === 'vanilla' ? 'vanilla' : ''}`}>{instance.software.kind === 'paper' ? <Rocket size={18} /> : <Server size={18} />}</span><div><strong>{instance.software.kind === 'paper' ? `Paper build ${instance.software.build}` : 'Vanilla server'}</strong><small>Server software is fixed for this world.</small></div></div>
+          <div className="software-summary"><span className={`choice-icon ${instance.software.kind}`}>{softwareIcon(instance)}</span><div><strong>{softwareName(instance)} server</strong><small>{instance.software.kind === 'forge' ? `${categoryLabel(instance.software.channel)} Forge build for Minecraft ${instance.version}.` : 'Server software is fixed for this world.'}</small></div></div>
           <fieldset className="choice-fieldset preset-choices settings-presets"><legend>Performance preset</legend>{presetOptions.map((preset) => <label className={`choice-card preset-card ${form.performancePreset === preset.id ? 'selected' : ''}`} key={preset.id}><input type="radio" name="settings-performance-preset" value={preset.id} checked={form.performancePreset === preset.id} onChange={() => applyPerformancePreset(preset.id)} /><span className="choice-copy"><strong>{preset.label}</strong><small>{preset.description}</small><em>{preset.detail}</em></span><span className="choice-check" aria-hidden="true">{form.performancePreset === preset.id && <Check size={12} />}</span></label>)}</fieldset>
           {form.performancePreset === 'custom' && <div className="custom-profile-note"><Gauge size={13} /> Custom values</div>}
           <div className="field-grid">
@@ -1110,7 +1244,7 @@ function SettingsView({ instance, totalMemoryMb, appSettings, backupState, savin
             <label className="field"><span>View distance</span><input type="number" min="2" max="32" value={form.viewDistance} onChange={(event) => updatePerformanceValue('viewDistance', Number(event.target.value))} /></label>
             <label className="field"><span>Simulation distance</span><input type="number" min="2" max={form.viewDistance} value={form.simulationDistance} onChange={(event) => updatePerformanceValue('simulationDistance', Number(event.target.value))} /></label>
           </div>
-          <label className="field"><span>Java executable</span><input value={form.javaPath} maxLength={500} onChange={(event) => update('javaPath', event.target.value)} /><small>Minecraft {instance.version} expects Java {instance.requiredJavaVersion}.</small></label>
+          <label className="field"><span>Java executable</span><input value={form.javaPath} maxLength={500} onChange={(event) => update('javaPath', event.target.value)} /><small>{instance.software.kind === 'forge' ? `Forge for Minecraft ${instance.version} requires exactly Java ${instance.requiredJavaVersion}.` : `Minecraft ${instance.version} expects Java ${instance.requiredJavaVersion}.`}</small></label>
         </div>
       </section>
 
@@ -1147,7 +1281,7 @@ function SettingsView({ instance, totalMemoryMb, appSettings, backupState, savin
                 {manualBackupBlockedReason && <small className="backup-blocked-reason">{manualBackupBlockedReason}</small>}
               </div>
               <div className="backup-safety-note"><ShieldCheck size={17} /><div><strong>Designed for consistent world saves</strong><span>If the server is online, EmberHost waits for every player to leave, temporarily stops Minecraft, copies the active world, checks its file counts and sizes, then starts it again. Older automatic copies beyond this limit are permanently removed only after a new backup succeeds.</span></div></div>
-              <div className="backup-scope-note"><Info size={16} /><span>World backups include world and player data, not plugins or server configuration. They stay on this computer, so they help with corruption or mistakes but do not protect against drive failure. World-preparation backups and unrecognized folders are never pruned.</span></div>
+              <div className="backup-scope-note"><Info size={16} /><span>World backups include world and player data, not plugins, mods, or server configuration. They stay on this computer, so they help with corruption or mistakes but do not protect against drive failure. World-preparation backups and unrecognized folders are never pruned.</span></div>
             </>
           ) : <div className="backup-loading" role="status"><LoaderCircle className="spin" size={18} /><span>Loading backup information…</span></div>}
         </div>
@@ -1162,7 +1296,7 @@ function SettingsView({ instance, totalMemoryMb, appSettings, backupState, savin
       </section>
 
       <section className="settings-section danger-zone">
-        <div className="settings-title"><span><Trash2 size={19} /></span><div><h3>Delete server</h3><p>Move this server, its world, backups, and plugins to the recycle bin.</p></div></div>
+        <div className="settings-title"><span><Trash2 size={19} /></span><div><h3>Delete server</h3><p>Move this server, its world, backups, and extensions to the recycle bin.</p></div></div>
         <div className="settings-fields danger-action"><div><strong>Delete {instance.name}</strong><span>Shared download caches are kept so other servers continue to work.</span></div><button type="button" className="button danger" disabled={active || saving || deleting || backupRunning} onClick={onDeleteRequest}><Trash2 size={16} /> Delete server</button></div>
       </section>
 
@@ -1185,7 +1319,7 @@ function DeleteServerDialog({ instance, deleting, onCancel, onConfirm }: {
         <span className="confirm-icon"><Trash2 size={23} /></span>
         <span className="eyebrow">Recoverable deletion</span>
         <h2 id="delete-server-title">Delete {instance.name}?</h2>
-        <p>EmberHost will move the entire server folder—including worlds, backups, logs, and plugins—to your recycle bin. The server must be stopped.</p>
+        <p>EmberHost will move the entire server folder—including worlds, backups, logs, plugins, and mods—to your recycle bin. The server must be stopped.</p>
         <label className="field"><span>Enter <strong>{instance.name}</strong> to confirm</span><input autoFocus value={confirmationName} disabled={deleting} onChange={(event) => setConfirmationName(event.target.value)} /></label>
         <div className="confirm-actions"><button type="button" className="button secondary" disabled={deleting} onClick={onCancel}>Cancel</button><button className="button danger" disabled={!matches || deleting}>{deleting ? <LoaderCircle className="spin" size={16} /> : <Trash2 size={16} />} Move to recycle bin</button></div>
       </form>
@@ -1243,7 +1377,7 @@ function RegenerateWorldDialog({ instance, seed, regenerating, blockedReason, er
         <span className="eyebrow">Destructive world reset</span>
         <h2 id="regenerate-world-title">Regenerate {instance.name}?</h2>
         <div className="regeneration-loss" id="regenerate-world-description"><strong>The previous world is wiped before the new one is created.</strong><span>This removes the active Overworld, Nether, and End, including every build, explored chunk, inventory, advancement, and player-data file in those worlds.</span></div>
-        <p id="regenerate-world-recovery">The old active world folders are moved to your recycle bin. Server settings, plugins, and EmberHost backups remain. Minecraft creates the replacement world the next time you start the server.</p>
+        <p id="regenerate-world-recovery">The old active world folders are moved to your recycle bin. Server settings, plugins, mods, and EmberHost backups remain. Minecraft creates the replacement world the next time you start the server.</p>
         <div className="seed-preview"><span>New world seed</span><code>{displayedSeed}</code></div>
         {blockedReason && <div className="tool-callout danger regeneration-error" role="status"><AlertTriangle size={17} /><div><strong>Regeneration is temporarily unavailable.</strong><span>{blockedReason}</span></div></div>}
         {error && <div className="tool-callout danger regeneration-error" role="alert"><AlertTriangle size={17} /><div><strong>The world was not regenerated.</strong><span>{error}</span></div></div>}
@@ -1276,11 +1410,14 @@ export default function App(): React.JSX.Element {
   const [backupStates, setBackupStates] = useState<Record<string, BackupState>>({})
   const [paperPlugins, setPaperPlugins] = useState<Record<string, PaperPluginInfo[]>>({})
   const [paperPluginCatalogs, setPaperPluginCatalogs] = useState<Record<string, CatalogPaperPlugin[]>>({})
+  const [forgeMods, setForgeMods] = useState<Record<string, ForgeModInfo[]>>({})
   const [busy, setBusy] = useState(false)
   const [worldBusy, setWorldBusy] = useState(false)
   const [pluginLoadingByInstance, setPluginLoadingByInstance] = useState<Record<string, boolean>>({})
   const [catalogLoadingByInstance, setCatalogLoadingByInstance] = useState<Record<string, boolean>>({})
   const [pluginBusy, setPluginBusy] = useState(false)
+  const [modLoadingByInstance, setModLoadingByInstance] = useState<Record<string, boolean>>({})
+  const [modBusy, setModBusy] = useState(false)
   const [catalogInstall, setCatalogInstall] = useState<{ instanceId: string; projectId: string } | null>(null)
   const [saving, setSaving] = useState(false)
   const [backupPolicySaving, setBackupPolicySaving] = useState(false)
@@ -1296,6 +1433,7 @@ export default function App(): React.JSX.Element {
   const [appSettings, setAppSettings] = useState<AppSettings>({ launchAtLogin: false, minimizeToTray: true })
   const pluginListRequest = useRef<Record<string, number>>({})
   const pluginCatalogRequest = useRef<Record<string, number>>({})
+  const modListRequest = useRef<Record<string, number>>({})
   const lanAddressRequest = useRef(0)
   const lanAddressResolved = useRef(false)
   const regenerationReturnFocus = useRef<HTMLElement | null>(null)
@@ -1314,10 +1452,12 @@ export default function App(): React.JSX.Element {
   const selectedBackupRunning = selectedBackupState?.status === 'running'
   const selectedPlugins = selected ? paperPlugins[selected.id] ?? [] : []
   const selectedPluginCatalog = selected ? paperPluginCatalogs[selected.id] ?? [] : []
+  const selectedMods = selected ? forgeMods[selected.id] ?? [] : []
   const selectedAddressHost = selectedLanAddress ?? lanAddresses[0] ?? 'localhost'
   const selectedServerAddress = selected ? `${selectedAddressHost}:${selected.port}` : ''
   const pluginLoading = selected ? pluginLoadingByInstance[selected.id] === true : false
   const catalogLoading = selected ? catalogLoadingByInstance[selected.id] === true : false
+  const modLoading = selected ? modLoadingByInstance[selected.id] === true : false
   const selectedActive = selected?.runtime.status === 'online' || selected?.runtime.status === 'starting'
   const selectedStopping = selected?.runtime.status === 'stopping'
   const regenerationInstance = regenerationTarget
@@ -1348,12 +1488,14 @@ export default function App(): React.JSX.Element {
         latestVersion: refreshed.latestVersion,
         versionLookupError: refreshed.versionLookupError,
         latestPaperBuild: refreshed.latestPaperBuild,
-        paperLookupError: refreshed.paperLookupError
+        paperLookupError: refreshed.paperLookupError,
+        preferredForgeBuild: refreshed.preferredForgeBuild,
+        forgeLookupError: refreshed.forgeLookupError
       } : current)
       setCreateError(null)
     } catch (error) {
       const message = friendlyError(error)
-      setBootstrap((current) => current ? { ...current, latestVersion: null, versionLookupError: message, latestPaperBuild: null, paperLookupError: message } : current)
+      setBootstrap((current) => current ? { ...current, latestVersion: null, versionLookupError: message, latestPaperBuild: null, paperLookupError: message, preferredForgeBuild: null, forgeLookupError: message } : current)
       setCreateError(message)
     }
   }
@@ -1520,7 +1662,28 @@ export default function App(): React.JSX.Element {
     }
   }, [selected?.id, view])
 
-  const createInstance = async (input: PaperCreateInput): Promise<void> => {
+  useEffect(() => {
+    if (!selected || view !== 'plugins' || instanceSoftware(selected).kind !== 'forge') return
+    const targetId = selected.id
+    const request = (modListRequest.current[targetId] ?? 0) + 1
+    modListRequest.current[targetId] = request
+    setModLoadingByInstance((current) => ({ ...current, [targetId]: true }))
+    void window.emberHost.getForgeMods(targetId).then((mods) => {
+      if (request === modListRequest.current[targetId]) setForgeMods((current) => ({ ...current, [targetId]: mods }))
+    }).catch((error) => {
+      if (request === modListRequest.current[targetId]) toast('error', friendlyError(error))
+    }).finally(() => {
+      if (request === modListRequest.current[targetId]) setModLoadingByInstance((current) => ({ ...current, [targetId]: false }))
+    })
+    return () => {
+      if (request === modListRequest.current[targetId]) {
+        modListRequest.current[targetId] = request + 1
+        setModLoadingByInstance((current) => ({ ...current, [targetId]: false }))
+      }
+    }
+  }, [selected?.id, view])
+
+  const createInstance = async (input: ServerCreateInput): Promise<void> => {
     setCreating(true)
     setCreateError(null)
     setCreateProgress({ phase: 'version', percent: 2, message: 'Preparing setup…' })
@@ -1771,6 +1934,82 @@ export default function App(): React.JSX.Element {
     }
   }
 
+  const refreshForgeMods = async (): Promise<void> => {
+    if (!selected || instanceSoftware(selected).kind !== 'forge') return
+    const target = selected
+    const request = (modListRequest.current[target.id] ?? 0) + 1
+    modListRequest.current[target.id] = request
+    setModLoadingByInstance((current) => ({ ...current, [target.id]: true }))
+    try {
+      const mods = await window.emberHost.getForgeMods(target.id)
+      if (request === modListRequest.current[target.id]) setForgeMods((current) => ({ ...current, [target.id]: mods }))
+    } catch (error) {
+      if (request === modListRequest.current[target.id]) toast('error', friendlyError(error))
+    } finally {
+      if (request === modListRequest.current[target.id]) setModLoadingByInstance((current) => ({ ...current, [target.id]: false }))
+    }
+  }
+
+  const installForgeMod = async (): Promise<void> => {
+    if (!selected || modBusy || modLoading || instanceSoftware(selected).kind !== 'forge') return
+    const target = selected
+    setModBusy(true)
+    try {
+      const result = await window.emberHost.chooseForgeMod(target.id)
+      modListRequest.current[target.id] = (modListRequest.current[target.id] ?? 0) + 1
+      setModLoadingByInstance((current) => ({ ...current, [target.id]: false }))
+      setForgeMods((current) => ({ ...current, [target.id]: result.mods }))
+      if (!result.canceled && result.installed) toast('success', `${result.installed.fileName} was added. Start Forge to load it.`)
+    } catch (error) {
+      toast('error', friendlyError(error))
+    } finally {
+      setModBusy(false)
+    }
+  }
+
+  const importForgeModsDirectory = async (): Promise<void> => {
+    if (!selected || modBusy || modLoading || instanceSoftware(selected).kind !== 'forge') return
+    const target = selected
+    setModBusy(true)
+    try {
+      const result = await window.emberHost.chooseForgeModsDirectory(target.id)
+      modListRequest.current[target.id] = (modListRequest.current[target.id] ?? 0) + 1
+      setModLoadingByInstance((current) => ({ ...current, [target.id]: false }))
+      setForgeMods((current) => ({ ...current, [target.id]: result.mods }))
+      if (!result.canceled) toast(result.importedCount ? 'success' : 'info', result.importedCount ? `${result.importedCount} mod${result.importedCount === 1 ? '' : 's'} imported. Start Forge to load them.` : 'No mod JARs were found in the selected folder.')
+    } catch (error) {
+      toast('error', friendlyError(error))
+    } finally {
+      setModBusy(false)
+    }
+  }
+
+  const removeForgeMod = async (fileName: string): Promise<void> => {
+    if (!selected || modBusy || modLoading || instanceSoftware(selected).kind !== 'forge') return
+    const target = selected
+    setModBusy(true)
+    try {
+      const mods = await window.emberHost.removeForgeMod({ instanceId: target.id, fileName })
+      modListRequest.current[target.id] = (modListRequest.current[target.id] ?? 0) + 1
+      setModLoadingByInstance((current) => ({ ...current, [target.id]: false }))
+      setForgeMods((current) => ({ ...current, [target.id]: mods }))
+      toast('success', `${fileName} was moved to the recycle bin.`)
+    } catch (error) {
+      toast('error', friendlyError(error))
+    } finally {
+      setModBusy(false)
+    }
+  }
+
+  const openForgeModsFolder = (): void => {
+    if (!selected || instanceSoftware(selected).kind !== 'forge') return
+    void window.emberHost.openForgeModsFolder(selected.id).catch((error) => toast('error', friendlyError(error)))
+  }
+
+  const openCurseForge = (): void => {
+    void window.emberHost.openCurseForge().catch((error) => toast('error', friendlyError(error)))
+  }
+
   const saveSettings = async (input: UpdateInstanceInput): Promise<void> => {
     setSaving(true)
     try {
@@ -1843,6 +2082,9 @@ export default function App(): React.JSX.Element {
       setWorldSeedErrorsByInstance((current) => { const next = { ...current }; delete next[target.id]; return next })
       setPaperPlugins((current) => { const next = { ...current }; delete next[target.id]; return next })
       setPaperPluginCatalogs((current) => { const next = { ...current }; delete next[target.id]; return next })
+      setForgeMods((current) => { const next = { ...current }; delete next[target.id]; return next })
+      setModLoadingByInstance((current) => { const next = { ...current }; delete next[target.id]; return next })
+      modListRequest.current[target.id] = (modListRequest.current[target.id] ?? 0) + 1
       setDeleteTarget(null)
       setView('overview')
       if (!remaining.length) setShowCreate(true)
@@ -1857,6 +2099,9 @@ export default function App(): React.JSX.Element {
   if (loadError) return <main className="fatal-screen"><AlertTriangle size={32} /><h1>EmberHost could not start</h1><p>{loadError}</p><button className="button secondary" onClick={() => location.reload()}><RotateCcw size={16} /> Try again</button></main>
   if (!bootstrap) return <LoadingScreen />
 
+  const extensionLabel = selected?.software.kind === 'forge' ? 'Mods' : selected?.software.kind === 'paper' ? 'Plugins' : 'Extensions'
+  const extensionEyebrow = selected?.software.kind === 'forge' ? 'Forge extensions' : selected?.software.kind === 'paper' ? 'Paper extensions' : 'Server extensions'
+
   return (
     <div className="app-shell">
       <aside className="sidebar">
@@ -1866,19 +2111,19 @@ export default function App(): React.JSX.Element {
           <span>Workspace</span>
           <button className={view === 'overview' ? 'active' : ''} onClick={() => setView('overview')}><LayoutDashboard size={18} /> Overview</button>
           <button className={view === 'world' ? 'active' : ''} onClick={openWorldView}><Map size={18} /> World tools</button>
-          <button className={view === 'plugins' ? 'active' : ''} onClick={() => setView('plugins')}><Puzzle size={18} /> Plugins {selected && instanceSoftware(selected).kind === 'paper' && <span className="nav-new">Paper</span>}</button>
+          <button className={view === 'plugins' ? 'active' : ''} onClick={() => setView('plugins')}>{selected?.software.kind === 'forge' ? <Layers3 size={18} /> : <Puzzle size={18} />} {extensionLabel} {selected?.software.kind === 'paper' && <span className="nav-new">Paper</span>}{selected?.software.kind === 'forge' && <span className="nav-new forge">Forge</span>}</button>
           <button className={view === 'console' ? 'active' : ''} onClick={() => setView('console')}><SquareTerminal size={18} /> Console {selectedLogs.some((entry) => entry.level === 'error') && <i />}</button>
           <button className={view === 'settings' ? 'active' : ''} onClick={() => setView('settings')}><Settings size={18} /> Settings</button>
         </nav>
         <div className="sidebar-spacer" />
         <button className="new-server-side" onClick={openCreate}><Plus size={17} /> New server</button>
-        {selected && <div className="sidebar-status"><div><span className={`status-dot status-${selected.runtime.status}`} /><div><strong>{selected.name}</strong><small>{statusLabels[selected.runtime.status]} · {selected.software.kind === 'paper' ? 'Paper' : 'Vanilla'} · :{selected.port}</small></div></div>{selected.software.kind === 'paper' ? <Rocket size={18} /> : <Server size={18} />}</div>}
+        {selected && <div className="sidebar-status"><div><span className={`status-dot status-${selected.runtime.status}`} /><div><strong>{selected.name}</strong><small>{statusLabels[selected.runtime.status]} · {softwareName(selected)} · :{selected.port}</small></div></div>{softwareIcon(selected)}</div>}
         <div className="app-version">EmberHost v{bootstrap.appVersion}</div>
       </aside>
 
       <main className="main-area">
         <header className="topbar">
-          <div><span className="eyebrow">{view === 'overview' ? 'Server workspace' : view === 'world' ? 'World operations' : view === 'plugins' ? 'Paper extensions' : view === 'console' ? 'Live operations' : 'Configuration'}</span><h1>{view === 'overview' ? selected?.name ?? 'Your server' : view === 'world' ? 'World tools' : view === 'plugins' ? 'Plugins' : view === 'console' ? 'Console' : 'Settings'}</h1></div>
+          <div><span className="eyebrow">{view === 'overview' ? 'Server workspace' : view === 'world' ? 'World operations' : view === 'plugins' ? extensionEyebrow : view === 'console' ? 'Live operations' : 'Configuration'}</span><h1>{view === 'overview' ? selected?.name ?? 'Your server' : view === 'world' ? 'World tools' : view === 'plugins' ? extensionLabel : view === 'console' ? 'Console' : 'Settings'}</h1></div>
           <div className="topbar-actions">
             {selected && <StatusBadge status={selected.runtime.status} />}
             {selected && <button className="icon-button" title="Open server folder" aria-label="Open server folder" onClick={() => void window.emberHost.openServerFolder(selected.id).catch((error) => toast('error', friendlyError(error)))}><FolderOpen size={18} /></button>}
@@ -1890,10 +2135,14 @@ export default function App(): React.JSX.Element {
         {selected ? (
           view === 'overview' ? <Overview instance={selected} backupState={selectedBackupState} address={selectedServerAddress} addressHost={selectedAddressHost} lanAddresses={lanAddresses} localOnly={!lanAddresses.length} logs={selectedLogs} now={now} busy={busy || worldBusy || regenerating || selectedBackupRunning} onStartStop={() => void startStop()} onOpenFolder={() => void window.emberHost.openServerFolder(selected.id).catch((error) => toast('error', friendlyError(error)))} onAddressChange={setSelectedLanAddress} onCopy={() => { void navigator.clipboard.writeText(selectedServerAddress).then(() => toast('info', 'Server address copied.')).catch((error) => toast('error', friendlyError(error))) }} onConsole={() => setView('console')} onWorld={openWorldView} onBackups={() => setView('settings')} />
              : view === 'world' && selectedPreparation && selectedForceLoads ? <WorldToolsView key={selected.id} instance={selected} preparation={selectedPreparation} forceLoads={selectedForceLoads} busy={worldBusy || busy || selectedBackupRunning} configuredSeed={selectedWorldSeed} seedLoading={selectedWorldSeedLoading} seedReady={selectedWorldSeedReady} seedError={selectedWorldSeedError} regenerating={regenerating} onReloadSeed={reloadWorldSeed} onRegenerateRequest={requestWorldRegeneration} onStartPreparation={startWorldPreparation} onPausePreparation={pauseWorldPreparation} onResumePreparation={resumeWorldPreparation} onCancelPreparation={cancelWorldPreparation} onAddForceLoad={addForceLoadedRegion} onRemoveForceLoad={removeForceLoadedRegion} onCreatePaper={openCreate} />
-               : view === 'plugins' ? <PluginsView key={selected.id} instance={selected} plugins={selectedPlugins} catalog={selectedPluginCatalog} loading={pluginLoading} catalogLoading={catalogLoading} busy={pluginBusy || pluginLoading || catalogLoading} installingProjectId={catalogInstall?.instanceId === selected.id ? catalogInstall.projectId : null} onInstall={() => void installPaperPlugin()} onInstallCatalog={(projectId) => void installCatalogPaperPlugin(projectId)} onOpenCatalogSource={openPaperPluginSource} onRemove={(fileName) => void removePaperPlugin(fileName)} onRefresh={() => void refreshPaperPlugins()} onRefreshCatalog={() => void refreshPaperPluginCatalog()} onCreatePaper={openCreate} />
+               : view === 'plugins' ? selected.software.kind === 'paper'
+                 ? <PluginsView key={selected.id} instance={selected} plugins={selectedPlugins} catalog={selectedPluginCatalog} loading={pluginLoading} catalogLoading={catalogLoading} busy={pluginBusy || pluginLoading || catalogLoading} installingProjectId={catalogInstall?.instanceId === selected.id ? catalogInstall.projectId : null} onInstall={() => void installPaperPlugin()} onInstallCatalog={(projectId) => void installCatalogPaperPlugin(projectId)} onOpenCatalogSource={openPaperPluginSource} onRemove={(fileName) => void removePaperPlugin(fileName)} onRefresh={() => void refreshPaperPlugins()} onRefreshCatalog={() => void refreshPaperPluginCatalog()} onCreatePaper={openCreate} />
+                 : selected.software.kind === 'forge'
+                   ? <ModsView key={selected.id} instance={selected} mods={selectedMods} loading={modLoading} busy={modBusy || modLoading} onInstall={() => void installForgeMod()} onImportDirectory={() => void importForgeModsDirectory()} onRemove={(fileName) => void removeForgeMod(fileName)} onRefresh={() => void refreshForgeMods()} onOpenFolder={openForgeModsFolder} onOpenCurseForge={openCurseForge} />
+                   : <ExtensionsGate onCreate={openCreate} />
                : view === 'console' ? <ConsoleView key={selected.id} instance={selected} logs={selectedLogs} onSend={sendCommand} />
                 : <SettingsView instance={selected} totalMemoryMb={bootstrap.totalMemoryMb} appSettings={appSettings} backupState={selectedBackupState} saving={saving} appSettingsSaving={appSettingsSaving} backupPolicySaving={backupPolicySaving} backupActionBusy={backupActionBusy} deleting={deleting} onSave={saveSettings} onAppSettings={saveAppSettings} onBackupPolicy={updateBackupPolicy} onBackupNow={createBackupNow} onOpenBackups={openBackupsFolder} onDeleteRequest={() => setDeleteTarget(selected)} />
-        ) : <div className="empty-workspace"><BrandMark large /><h2>Create your first server</h2><p>Start with recommended Paper performance or choose the official Vanilla experience.</p><button className="button primary" onClick={openCreate}><Plus size={17} /> Create a server</button></div>}
+        ) : <div className="empty-workspace"><BrandMark large /><h2>Create your first server</h2><p>Start with recommended Paper performance, a moddable Forge world, or the official Vanilla experience.</p><button className="button primary" onClick={openCreate}><Plus size={17} /> Create a server</button></div>}
       </main>
 
       {showCreate && <CreateServerDialog bootstrap={bootstrap} canClose={instances.length > 0} progress={createProgress} creating={creating} error={createError} onClose={() => setShowCreate(false)} onCreate={createInstance} />}

@@ -55,13 +55,26 @@ try {
   if (await window.getByRole('button', { name: 'Continue' }).isEnabled()) {
     throw new Error('Creation advanced for an official release without a Mojang server artifact.')
   }
-  await releaseSelect.selectOption(initialRelease)
+  const supportedLoaderRelease = '1.21.1'
+  await releaseSelect.selectOption(supportedLoaderRelease)
   const paperChoice = window.locator('input[name="software"][value="paper"]')
   await paperChoice.locator('xpath=..').waitFor()
-  for (let attempt = 0; attempt < 100 && !(await paperChoice.isEnabled()); attempt += 1) {
+  for (let attempt = 0; attempt < 300 && !(await paperChoice.isEnabled()); attempt += 1) {
     await new Promise((resolveWait) => setTimeout(resolveWait, 100))
   }
-  if (!(await paperChoice.isEnabled())) throw new Error(`Paper did not become available for Minecraft ${initialRelease}.`)
+  if (!(await paperChoice.isEnabled())) throw new Error(`Paper did not become available for Minecraft ${supportedLoaderRelease}.`)
+  const forgeChoice = window.locator('input[name="software"][value="forge"]')
+  await forgeChoice.locator('xpath=..').waitFor()
+  for (let attempt = 0; attempt < 300 && !(await forgeChoice.isEnabled()); attempt += 1) {
+    await new Promise((resolveWait) => setTimeout(resolveWait, 100))
+  }
+  if (!(await forgeChoice.isEnabled())) throw new Error(`Forge did not become available for Minecraft ${supportedLoaderRelease}.`)
+  await forgeChoice.check()
+  const forgeProvenance = window.locator('.forge-provenance strong')
+  await forgeProvenance.waitFor()
+  if (!/^Forge [0-9.]+ .* (Recommended|Latest)$/.test((await forgeProvenance.textContent()) ?? '')) {
+    throw new Error(`Forge provenance was not shown: ${await forgeProvenance.textContent()}`)
+  }
   await paperChoice.check()
   await window.getByRole('button', { name: 'Continue' }).click()
   await window.getByText('Shape performance').waitFor()

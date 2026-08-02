@@ -188,7 +188,7 @@ async function harness(options: {
     version: '26.2',
     serverDirectory,
     software: options.software ?? { kind: 'vanilla' },
-    launchArtifact: options.software?.kind === 'paper' ? 'paper.jar' : 'server.jar',
+    launch: { kind: 'jar', path: options.software?.kind === 'paper' ? 'paper.jar' : 'server.jar' },
     jarSha1: options.software?.kind === 'paper' ? null : 'abc',
     artifactSha256: options.software?.kind === 'paper' ? 'a'.repeat(64) : null,
     requiredJavaVersion: 25,

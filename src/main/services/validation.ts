@@ -11,7 +11,12 @@ const javaPath = z.string().trim().min(1).max(500)
 const performancePreset = z.enum(['balanced', 'far-view', 'maximum-performance', 'custom'])
 const serverSoftware = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('vanilla') }),
-  z.object({ kind: z.literal('paper'), build: z.number().int().positive() })
+  z.object({ kind: z.literal('paper'), build: z.number().int().positive() }),
+  z.object({
+    kind: z.literal('forge'),
+    forgeVersion: z.string().min(1).max(64).regex(/^[A-Za-z0-9._+-]+$/, 'Invalid Forge version.'),
+    channel: z.enum(['recommended', 'latest', 'exact'])
+  })
 ])
 
 export const instanceIdSchema = z.string().uuid()
@@ -58,6 +63,12 @@ export const removePaperPluginSchema = z.object({
   instanceId: instanceIdSchema,
   fileName: z.string().min(5).max(240)
     .regex(/^[^<>:"/\\|?*\u0000-\u001f]+\.jar$/i, 'Invalid plugin file name.')
+})
+
+export const removeForgeModSchema = z.object({
+  instanceId: instanceIdSchema,
+  fileName: z.string().min(5).max(240)
+    .regex(/^[^<>:"/\\|?*\u0000-\u001f]+\.jar$/i, 'Invalid mod file name.')
 })
 
 export const catalogPluginInstallSchema = z.object({

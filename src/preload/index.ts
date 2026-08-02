@@ -11,6 +11,7 @@ import type {
   EmberHostApi,
   ForceLoadedRegionsState,
   RegenerateWorldInput,
+  RemoveForgeModInput,
   RemoveForceLoadedRegionInput,
   RemovePaperPluginInput,
   SetupProgress,
@@ -29,6 +30,7 @@ const api: EmberHostApi = {
   getMinecraftReleases: () => ipcRenderer.invoke(channels.minecraftReleases),
   getMinecraftRelease: (minecraftVersion: string) => ipcRenderer.invoke(channels.minecraftRelease, minecraftVersion),
   getLatestPaperBuild: (minecraftVersion: string) => ipcRenderer.invoke(channels.latestPaperBuild, minecraftVersion),
+  getPreferredForgeBuild: (minecraftVersion: string) => ipcRenderer.invoke(channels.preferredForgeBuild, minecraftVersion),
   checkJava: (javaPath?: string) => ipcRenderer.invoke(channels.checkJava, javaPath),
   createInstance: (input: CreateInstanceInput) => ipcRenderer.invoke(channels.createInstance, input),
   updateInstance: (input: UpdateInstanceInput) => ipcRenderer.invoke(channels.updateInstance, input),
@@ -60,6 +62,12 @@ const api: EmberHostApi = {
   getPaperPluginCatalog: (id: string) => ipcRenderer.invoke(channels.getPaperPluginCatalog, id),
   installCatalogPaperPlugin: (input: CatalogPluginInstallInput) => ipcRenderer.invoke(channels.installCatalogPaperPlugin, input),
   openPaperPluginPage: (projectId: string) => ipcRenderer.invoke(channels.openPaperPluginPage, projectId),
+  getForgeMods: (id: string) => ipcRenderer.invoke(channels.getForgeMods, id),
+  chooseForgeMod: (id: string) => ipcRenderer.invoke(channels.chooseForgeMod, id),
+  chooseForgeModsDirectory: (id: string) => ipcRenderer.invoke(channels.chooseForgeModsDirectory, id),
+  removeForgeMod: (input: RemoveForgeModInput) => ipcRenderer.invoke(channels.removeForgeMod, input),
+  openForgeModsFolder: (id: string) => ipcRenderer.invoke(channels.openForgeModsFolder, id),
+  openCurseForge: () => ipcRenderer.invoke(channels.openCurseForge),
   onSetupProgress: (listener: (progress: SetupProgress) => void) => {
     const callback = (_event: Electron.IpcRendererEvent, progress: SetupProgress): void => listener(progress)
     ipcRenderer.on(channels.setupProgress, callback)

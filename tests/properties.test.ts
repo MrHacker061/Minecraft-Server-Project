@@ -14,7 +14,7 @@ const instance: ServerInstance = {
   version: '26.2',
   serverDirectory: 'C:\\servers\\test',
   software: { kind: 'vanilla' },
-  launchArtifact: 'server.jar',
+  launch: { kind: 'jar', path: 'server.jar' },
   jarSha1: 'abc',
   artifactSha256: null,
   requiredJavaVersion: 25,

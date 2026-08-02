@@ -9,7 +9,7 @@ const paperInstance: ServerInstance = {
   version: '26.2',
   serverDirectory: 'C:\\server',
   software: { kind: 'paper', build: 87, channel: 'STABLE' },
-  launchArtifact: 'paper.jar',
+  launch: { kind: 'jar', path: 'paper.jar' },
   jarSha1: null,
   artifactSha256: 'a'.repeat(64),
   requiredJavaVersion: 25,

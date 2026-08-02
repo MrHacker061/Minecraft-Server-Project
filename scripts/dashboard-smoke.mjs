@@ -8,8 +8,10 @@ const testProfile = resolve(workspace, '.smoke-dashboard-data')
 const artifacts = resolve(workspace, 'artifacts')
 const serverId = '8f4b1cf8-7f1f-45d2-889f-2f0fc3c5f23c'
 const paperServerId = '5030c6a4-1aa3-4adc-9a7c-4e1bed90fb3c'
+const forgeServerId = '094231ff-d165-4268-9864-fe80565e9d35'
 const serverDirectory = resolve(testProfile, 'runtime-data', 'servers', serverId)
 const paperServerDirectory = resolve(testProfile, 'runtime-data', 'servers', paperServerId)
+const forgeServerDirectory = resolve(testProfile, 'runtime-data', 'servers', forgeServerId)
 
 async function waitForInputValue(input, expected, timeoutMs = 10_000) {
   const deadline = Date.now() + timeoutMs
@@ -33,6 +35,8 @@ await rm(testProfile, { recursive: true, force: true })
 await mkdir(serverDirectory, { recursive: true })
 await mkdir(paperServerDirectory, { recursive: true })
 await mkdir(resolve(paperServerDirectory, 'plugins'), { recursive: true })
+await mkdir(resolve(forgeServerDirectory, 'mods'), { recursive: true })
+await mkdir(resolve(forgeServerDirectory, 'libraries', 'net', 'minecraftforge', 'forge', '1.21.1-52.1.16'), { recursive: true })
 await mkdir(artifacts, { recursive: true })
 const vanillaLevelName = 'cedar_world'
 const vanillaWorldDirectories = [
@@ -51,8 +55,11 @@ await Promise.all(paperWorldDirectories.map((directory) => mkdir(directory, { re
 await Promise.all(paperWorldDirectories.map((directory, index) => writeFile(resolve(directory, 'level.dat'), `paper-world-${index}`, 'utf8')))
 await writeFile(resolve(serverDirectory, 'server.jar'), 'seeded vanilla server', 'utf8')
 await writeFile(resolve(paperServerDirectory, 'paper.jar'), 'seeded paper server', 'utf8')
+await writeFile(resolve(forgeServerDirectory, 'libraries', 'net', 'minecraftforge', 'forge', '1.21.1-52.1.16', 'win_args.txt'), 'seeded Forge Windows arguments', 'utf8')
+await writeFile(resolve(forgeServerDirectory, 'libraries', 'net', 'minecraftforge', 'forge', '1.21.1-52.1.16', 'unix_args.txt'), 'seeded Forge Unix arguments', 'utf8')
 await writeFile(resolve(serverDirectory, 'emberhost-instance.json'), `${JSON.stringify({ id: serverId })}\n`, 'utf8')
 await writeFile(resolve(paperServerDirectory, 'emberhost-instance.json'), `${JSON.stringify({ id: paperServerId })}\n`, 'utf8')
+await writeFile(resolve(forgeServerDirectory, 'emberhost-instance.json'), `${JSON.stringify({ id: forgeServerId })}\n`, 'utf8')
 await writeFile(resolve(serverDirectory, 'server.properties'), `# smoke properties\nlevel-name=${vanillaLevelName}\nlevel-seed=old-seed\nunknown-smoke-setting=preserve-me\n`, 'utf8')
 await writeFile(resolve(paperServerDirectory, 'server.properties'), 'level-name=world\nlevel-seed=paper-seed\n', 'utf8')
 await writeFile(resolve(paperServerDirectory, 'plugins', 'Chunky.jar'), 'seeded built-in plugin', 'utf8')
@@ -60,7 +67,7 @@ await writeFile(resolve(paperServerDirectory, 'plugins', 'ExamplePlugin.jar'), '
 
 const timestamp = '2026-07-31T12:00:00.000Z'
 await writeFile(resolve(testProfile, 'runtime-data', 'emberhost.json'), `${JSON.stringify({
-  schemaVersion: 2,
+  schemaVersion: 3,
   settings: { launchAtLogin: false, minimizeToTray: true },
   instances: [{
     id: serverId,
@@ -68,7 +75,7 @@ await writeFile(resolve(testProfile, 'runtime-data', 'emberhost.json'), `${JSON.
     version: '26.2',
     serverDirectory,
     software: { kind: 'vanilla' },
-    launchArtifact: 'server.jar',
+    launch: { kind: 'jar', path: 'server.jar' },
     jarSha1: '823e2250d24b3ddac457a60c92a6a941943fcd6a',
     artifactSha256: null,
     requiredJavaVersion: 25,
@@ -92,7 +99,7 @@ await writeFile(resolve(testProfile, 'runtime-data', 'emberhost.json'), `${JSON.
     version: '26.2',
     serverDirectory: paperServerDirectory,
     software: { kind: 'paper', build: 87, channel: 'STABLE' },
-    launchArtifact: 'paper.jar',
+    launch: { kind: 'jar', path: 'paper.jar' },
     jarSha1: null,
     artifactSha256: 'a'.repeat(64),
     requiredJavaVersion: 25,
@@ -107,6 +114,34 @@ await writeFile(resolve(testProfile, 'runtime-data', 'emberhost.json'), `${JSON.
     viewDistance: 16,
     simulationDistance: 6,
     performancePreset: 'far-view',
+    eulaAcceptedAt: timestamp,
+    createdAt: timestamp,
+    updatedAt: timestamp
+  }, {
+    id: forgeServerId,
+    name: 'Forge Hollow',
+    version: '1.21.1',
+    serverDirectory: forgeServerDirectory,
+    software: { kind: 'forge', forgeVersion: '52.1.16', mavenVersion: '1.21.1-52.1.16', channel: 'latest', installerSha1: 'b'.repeat(40) },
+    launch: {
+      kind: 'java-argfile',
+      windowsPath: 'libraries/net/minecraftforge/forge/1.21.1-52.1.16/win_args.txt',
+      unixPath: 'libraries/net/minecraftforge/forge/1.21.1-52.1.16/unix_args.txt'
+    },
+    jarSha1: null,
+    artifactSha256: null,
+    requiredJavaVersion: 21,
+    javaPath: 'java',
+    port: 25567,
+    memoryMb: 6144,
+    maxPlayers: 12,
+    motd: 'Ready for trusted mods',
+    gameMode: 'survival',
+    difficulty: 'normal',
+    onlineMode: true,
+    viewDistance: 10,
+    simulationDistance: 8,
+    performancePreset: 'custom',
     eulaAcceptedAt: timestamp,
     createdAt: timestamp,
     updatedAt: timestamp
@@ -173,7 +208,7 @@ try {
   let regenerationDialog = window.getByRole('alertdialog', { name: 'Regenerate Cedar Valley?' })
   await regenerationDialog.getByText('The previous world is wiped before the new one is created.').waitFor()
   await regenerationDialog.getByText('This removes the active Overworld, Nether, and End, including every build, explored chunk, inventory, advancement, and player-data file in those worlds.').waitFor()
-  await regenerationDialog.getByText('The old active world folders are moved to your recycle bin. Server settings, plugins, and EmberHost backups remain. Minecraft creates the replacement world the next time you start the server.').waitFor()
+  await regenerationDialog.getByText('The old active world folders are moved to your recycle bin. Server settings, plugins, mods, and EmberHost backups remain. Minecraft creates the replacement world the next time you start the server.').waitFor()
   await regenerationDialog.getByText('New world seed').waitFor()
   const regenerationConfirmation = regenerationDialog.getByLabel('Enter Cedar Valley to confirm world regeneration')
   await regenerationConfirmation.fill('wrong name')
@@ -227,9 +262,9 @@ try {
     throw new Error('Regeneration changed the server launch artifact.')
   }
   await window.screenshot({ path: resolve(artifacts, 'world-tools.png') })
-  await window.getByRole('button', { name: 'Plugins', exact: false }).click()
-  await window.getByText('Plugins need a Paper server.').waitFor()
-  await window.screenshot({ path: resolve(artifacts, 'plugins-vanilla.png') })
+  await window.getByRole('button', { name: 'Extensions', exact: false }).click()
+  await window.getByText('This server keeps the official Vanilla experience.', { exact: true }).waitFor()
+  await window.screenshot({ path: resolve(artifacts, 'extensions-vanilla.png') })
   await window.getByLabel('Active server').selectOption(paperServerId)
   if (await window.getByLabel('Active server').inputValue() !== paperServerId) {
     throw new Error('Paper server selection did not stick.')
@@ -303,6 +338,16 @@ try {
     throw new Error(`Automatic backup policy did not persist: ${JSON.stringify(savedBackupPolicy)}`)
   }
   await window.screenshot({ path: resolve(artifacts, 'backup-settings.png') })
+  await window.getByLabel('Active server').selectOption(forgeServerId)
+  await window.locator('nav').getByRole('button', { name: 'Mods', exact: false }).click()
+  await window.getByText('Forge mods', { exact: true }).waitFor()
+  await window.getByRole('button', { name: 'Browse CurseForge', exact: true }).waitFor()
+  await window.getByRole('button', { name: 'Import mods folder', exact: true }).waitFor()
+  await window.getByRole('button', { name: 'Add mod JAR', exact: true }).waitFor()
+  await window.getByText(/await CurseForge API approval/i).waitFor()
+  await window.screenshot({ path: resolve(artifacts, 'forge-mods.png') })
+  await window.getByLabel('Active server').selectOption(paperServerId)
+  await window.getByRole('button', { name: 'Settings', exact: true }).click()
   await window.getByRole('button', { name: 'Delete server', exact: true }).click()
   const deleteDialog = window.getByRole('dialog', { name: 'Delete Paper Ridge?' })
   await deleteDialog.waitFor()
@@ -319,7 +364,7 @@ try {
   await deleteDialog.getByRole('button', { name: 'Cancel', exact: true }).click()
   await access(resolve(testProfile, 'runtime-data', 'emberhost.json'))
   if (browserMessages.length) throw new Error(`Dashboard renderer errors after interactions: ${JSON.stringify(browserMessages)}`)
-  process.stdout.write(`${JSON.stringify({ dashboard: true, browserMessages, screenshots: ['artifacts/dashboard.png', 'artifacts/world-tools.png', 'artifacts/regenerate-confirm.png', 'artifacts/plugins-vanilla.png', 'artifacts/paper-dashboard.png', 'artifacts/paper-world-tools.png', 'artifacts/paper-plugins.png', 'artifacts/backup-settings.png', 'artifacts/delete-confirm.png'] })}\n`)
+  process.stdout.write(`${JSON.stringify({ dashboard: true, browserMessages, screenshots: ['artifacts/dashboard.png', 'artifacts/world-tools.png', 'artifacts/regenerate-confirm.png', 'artifacts/extensions-vanilla.png', 'artifacts/paper-dashboard.png', 'artifacts/paper-world-tools.png', 'artifacts/paper-plugins.png', 'artifacts/backup-settings.png', 'artifacts/forge-mods.png', 'artifacts/delete-confirm.png'] })}\n`)
 } finally {
   await application.evaluate(({ app }) => {
     setTimeout(() => app.exit(0), 20)

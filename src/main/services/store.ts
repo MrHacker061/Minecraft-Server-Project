@@ -5,13 +5,13 @@ import type { AppSettings, ServerInstance } from '../../shared/contracts'
 import { AppError } from './errors'
 
 interface PersistedData {
-  schemaVersion: 2
+  schemaVersion: 3
   settings: AppSettings
   instances: ServerInstance[]
 }
 
 const initialData: PersistedData = {
-  schemaVersion: 2,
+  schemaVersion: 3,
   settings: {
     launchAtLogin: false,
     minimizeToTray: true
@@ -52,7 +52,7 @@ const persistedDataV1Schema = z.object({
   instances: z.array(serverInstanceV1Schema)
 })
 
-const softwareSchema = z.discriminatedUnion('kind', [
+const softwareV2Schema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('vanilla') }),
   z.object({
     kind: z.literal('paper'),
@@ -61,8 +61,8 @@ const softwareSchema = z.discriminatedUnion('kind', [
   })
 ])
 
-const serverInstanceSchema = serverInstanceV1Schema.extend({
-  software: softwareSchema,
+const serverInstanceV2Schema = serverInstanceV1Schema.extend({
+  software: softwareV2Schema,
   launchArtifact: z.string().min(1).max(160).regex(/^[A-Za-z0-9._-]+\.jar$/i),
   jarSha1: z.string().nullable(),
   artifactSha256: z.string().regex(/^[a-f0-9]{64}$/).nullable(),
@@ -73,14 +73,79 @@ const serverInstanceSchema = serverInstanceV1Schema.extend({
   }
 })
 
-const persistedDataSchema = z.object({
+const persistedDataV2Schema = z.object({
   schemaVersion: z.literal(2),
+  settings: settingsSchema,
+  instances: z.array(serverInstanceV2Schema)
+})
+
+const safeLaunchPath = z.string().min(1).max(500).refine((value) => {
+  if (value.startsWith('/') || value.startsWith('\\') || value.includes('\\') || value.includes(':')) return false
+  const parts = value.split('/')
+  return parts.every((part) => part && part !== '.' && part !== '..' && /^[A-Za-z0-9._-]+$/.test(part))
+}, 'Launch paths must be safe relative paths.')
+
+const launchSchema = z.discriminatedUnion('kind', [
+  z.object({
+    kind: z.literal('jar'),
+    path: safeLaunchPath.refine((value) => value.endsWith('.jar'), 'JAR launch targets must end in .jar.')
+  }),
+  z.object({
+    kind: z.literal('java-argfile'),
+    windowsPath: safeLaunchPath.refine((value) => value.endsWith('/win_args.txt'), 'Invalid Forge Windows argument file.'),
+    unixPath: safeLaunchPath.refine((value) => value.endsWith('/unix_args.txt'), 'Invalid Forge Unix argument file.')
+  })
+])
+
+const softwareSchema = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('vanilla') }),
+  z.object({
+    kind: z.literal('paper'),
+    build: z.number().int().positive(),
+    channel: z.string().min(1).max(32)
+  }),
+  z.object({
+    kind: z.literal('forge'),
+    forgeVersion: z.string().min(1).max(64).regex(/^[A-Za-z0-9._+-]+$/),
+    mavenVersion: z.string().min(1).max(160).regex(/^[A-Za-z0-9._+-]+$/),
+    channel: z.enum(['recommended', 'latest', 'exact']),
+    installerSha1: z.string().regex(/^[a-f0-9]{40}$/)
+  })
+])
+
+const serverInstanceSchema = serverInstanceV1Schema.omit({ jarSha1: true }).extend({
+  software: softwareSchema,
+  launch: launchSchema,
+  jarSha1: z.string().nullable(),
+  artifactSha256: z.string().regex(/^[a-f0-9]{64}$/).nullable(),
+  performancePreset: z.enum(['balanced', 'far-view', 'maximum-performance', 'custom'])
+}).superRefine((instance, context) => {
+  if (instance.software.kind === 'paper' && !instance.artifactSha256) {
+    context.addIssue({ code: 'custom', message: 'Paper instances require a SHA-256.' })
+  }
+  if (instance.software.kind !== 'forge' && instance.launch.kind !== 'jar') {
+    context.addIssue({ code: 'custom', message: 'Only Forge instances may use Java argument files.' })
+  }
+  if (instance.software.kind !== 'forge' && instance.launch.kind === 'jar' && instance.launch.path.includes('/')) {
+    context.addIssue({ code: 'custom', message: 'Vanilla and Paper launch JARs must be stored at the server root.' })
+  }
+  if (instance.software.kind === 'forge') {
+    const standardMavenVersion = `${instance.version}-${instance.software.forgeVersion}`
+    const legacyMavenVersion = `${standardMavenVersion}-${instance.version}`
+    if (![standardMavenVersion, legacyMavenVersion].includes(instance.software.mavenVersion)) {
+      context.addIssue({ code: 'custom', message: 'The Forge Maven coordinate does not match this Minecraft release.' })
+    }
+  }
+})
+
+const persistedDataSchema = z.object({
+  schemaVersion: z.literal(3),
   settings: settingsSchema,
   instances: z.array(serverInstanceSchema)
 })
 
 function cloneInstance(instance: ServerInstance): ServerInstance {
-  return { ...instance, software: { ...instance.software } }
+  return { ...instance, software: { ...instance.software }, launch: { ...instance.launch } }
 }
 
 export class AppStore {
@@ -116,15 +181,29 @@ export class AppStore {
         return
       }
 
+      const versionTwo = persistedDataV2Schema.safeParse(rawData)
+      if (versionTwo.success) {
+        this.data = {
+          schemaVersion: 3,
+          settings: versionTwo.data.settings,
+          instances: versionTwo.data.instances.map(({ launchArtifact, ...instance }) => ({
+            ...instance,
+            launch: { kind: 'jar' as const, path: launchArtifact }
+          }))
+        }
+        await this.persist()
+        return
+      }
+
       const legacy = persistedDataV1Schema.safeParse(rawData)
       if (!legacy.success) throw current.error
       this.data = {
-        schemaVersion: 2,
+        schemaVersion: 3,
         settings: legacy.data.settings,
         instances: legacy.data.instances.map((instance) => ({
           ...instance,
           software: { kind: 'vanilla' as const },
-          launchArtifact: 'server.jar',
+          launch: { kind: 'jar' as const, path: 'server.jar' },
           artifactSha256: null,
           performancePreset: 'custom' as const
         }))

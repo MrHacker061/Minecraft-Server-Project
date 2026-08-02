@@ -63,10 +63,43 @@ vi.mock('../src/main/services/chunky', () => ({
   })
 }))
 
+vi.mock('../src/main/services/forge', () => ({
+  resolveForgeBuild: vi.fn(async (minecraftVersion: string, forgeVersion: string, channel: string) => ({
+    minecraftVersion,
+    forgeVersion,
+    mavenVersion: `${minecraftVersion}-${forgeVersion}`,
+    channel,
+    installer: {
+      name: `forge-${minecraftVersion}-${forgeVersion}-installer.jar`,
+      sha1: 'f'.repeat(40),
+      url: `https://maven.minecraftforge.net/net/minecraftforge/forge/${minecraftVersion}-${forgeVersion}/forge-${minecraftVersion}-${forgeVersion}-installer.jar`
+    }
+  })),
+  downloadForgeInstaller: vi.fn(async (_build: unknown, destination: string) => {
+    await writeFile(destination, 'fake forge installer', 'utf8')
+    return { algorithm: 'sha512', digest: 'c'.repeat(128) }
+  }),
+  installForgeServer: vi.fn(async (_build: unknown, _installer: string, stagingDirectory: string) => {
+    const base = join(stagingDirectory, 'libraries', 'net', 'minecraftforge', 'forge', '26.2-65.1.0')
+    await mkdir(base, { recursive: true })
+    await Promise.all([
+      writeFile(join(base, 'win_args.txt'), 'forge windows args', 'utf8'),
+      writeFile(join(base, 'unix_args.txt'), 'forge unix args', 'utf8'),
+      mkdir(join(stagingDirectory, 'mods'), { recursive: true })
+    ])
+    return {
+      kind: 'java-argfile' as const,
+      windowsPath: 'libraries/net/minecraftforge/forge/26.2-65.1.0/win_args.txt',
+      unixPath: 'libraries/net/minecraftforge/forge/26.2-65.1.0/unix_args.txt'
+    }
+  })
+}))
+
 import type { CreateInstanceInput } from '../src/shared/contracts'
 import { BACKUP_MARKER_FILE } from '../src/main/services/backup-safety'
 import { downloadChunky, resolveChunkyForPaper } from '../src/main/services/chunky'
 import { InstanceService } from '../src/main/services/instance-service'
+import { downloadForgeInstaller, installForgeServer, resolveForgeBuild } from '../src/main/services/forge'
 import { downloadServerJar, resolveRelease } from '../src/main/services/minecraft'
 import { downloadPaperJar, resolvePaperBuild } from '../src/main/services/paper'
 import { ServerManager } from '../src/main/services/server-manager'
@@ -92,6 +125,9 @@ afterEach(async () => {
   vi.mocked(resolvePaperBuild).mockClear()
   vi.mocked(downloadChunky).mockClear()
   vi.mocked(resolveChunkyForPaper).mockClear()
+  vi.mocked(resolveForgeBuild).mockClear()
+  vi.mocked(downloadForgeInstaller).mockClear()
+  vi.mocked(installForgeServer).mockClear()
   await Promise.all(temporaryDirectories.splice(0).map((directory) => rm(directory, { recursive: true, force: true })))
 })
 
@@ -141,11 +177,43 @@ describe('InstanceService', () => {
     expect(await readFile(join(instance.serverDirectory, 'plugins', 'Chunky.jar'), 'utf8')).toBe('fake chunky')
     expect(instance).toMatchObject({
       software: { kind: 'paper', build: 87, channel: 'STABLE' },
-      launchArtifact: 'paper.jar',
+      launch: { kind: 'jar', path: 'paper.jar' },
       jarSha1: null,
       artifactSha256: 'a'.repeat(64)
     })
     expect(store.getInstance(instance.id)?.software).toEqual({ kind: 'paper', build: 87, channel: 'STABLE' })
+  })
+
+  it('runs the pinned Forge installer and records its detected argument-file launch', async () => {
+    const { store, service } = await harness()
+    const instance = await service.create({
+      ...input,
+      name: 'Forge world',
+      software: { kind: 'forge', forgeVersion: '65.1.0', channel: 'recommended' }
+    }, () => undefined)
+
+    expect(resolveForgeBuild).toHaveBeenCalledWith('26.2', '65.1.0', 'recommended')
+    expect(downloadForgeInstaller).toHaveBeenCalledOnce()
+    expect(installForgeServer).toHaveBeenCalledOnce()
+    expect(await readdir(join(instance.serverDirectory, 'mods'))).toEqual([])
+    expect(instance).toMatchObject({
+      software: {
+        kind: 'forge',
+        forgeVersion: '65.1.0',
+        mavenVersion: '26.2-65.1.0',
+        channel: 'recommended',
+        installerSha1: 'f'.repeat(40)
+      },
+      launch: {
+        kind: 'java-argfile',
+        windowsPath: 'libraries/net/minecraftforge/forge/26.2-65.1.0/win_args.txt',
+        unixPath: 'libraries/net/minecraftforge/forge/26.2-65.1.0/unix_args.txt'
+      },
+      jarSha1: null,
+      artifactSha256: null,
+      performancePreset: 'balanced'
+    })
+    expect(store.getInstance(instance.id)?.software.kind).toBe('forge')
   })
 
   it('removes staging data and does not persist an instance after setup failure', async () => {
